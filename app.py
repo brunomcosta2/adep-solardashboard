@@ -15,6 +15,29 @@ accounts = [
     ("mapadeporto", "info-2030", "uni005eu5"), # MAP funcional
 ]
 
+def custom_get_station_list(self) -> list:
+    r = self._session.post(
+        url=f"https://{self._huawei_subdomain}.fusionsolar.huawei.com/rest/pvms/web/station/v1/station/station-list",
+        json={
+            "curPage": 1,
+            "pageSize": 50,  # increased limit
+            "gridConnectedTime": "",
+            "queryTime": self._get_day_start_sec(),
+            "timeZone": 2,
+            "sortId": "createTime",
+            "sortDir": "DESC",
+            "locale": "en_US"
+        }
+    )
+    r.raise_for_status()
+    obj_tree = r.json()
+    if not obj_tree["success"]:
+        raise Exception("Failed to retrieve station list")
+    return obj_tree["data"]["list"]
+
+# Monkey-patch the class
+FusionSolarClient.get_station_list = custom_get_station_list
+
 '''
 accounts = [
     ("ID1", "PASS1", "uni004eu5"),  
@@ -513,3 +536,4 @@ def live_data():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
