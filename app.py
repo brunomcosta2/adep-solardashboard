@@ -402,13 +402,13 @@ def process_account(account):
                 status_icon = "🟢"
                 error_state = 0
             elif plant['plantStatus'] == 'disconnected':
-                status_icon = "🔴"
+                status_icon = "⚠️"
                 error_state = 1
             elif plant['plantStatus'] == 'connected' and production_power != 0 and consumption_power == 0:
                 status_icon = "🟡"
                 error_state = 2
             elif plant['plantStatus'] == 'connected' and production_power == 0:
-                status_icon = "🔴"
+                status_icon = "⚠️"
                 error_state = 3
             else:
                 status_icon = "🟡"
@@ -499,7 +499,7 @@ def live_data():
 
         alert_message = "✅ Todas as instalações estão a funcionar normalmente."
         if zero_production_plants:
-            zero_production_plants.sort(key=lambda x: x.startswith("⏳"))
+            zero_production_plants.sort(key=lambda x: x.startswith("⌛"))
             alert_message = "As seguintes instalações estão com problemas:\n" + "\n".join([f"- {p}" for p in zero_production_plants])
 
         current_time = datetime.now().strftime('%H:%M')
@@ -536,4 +536,5 @@ def live_data():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
 
