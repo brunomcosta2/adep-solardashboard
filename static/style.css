@@ -1,0 +1,289 @@
+/* General */
+body {
+  margin: 0;
+  font-family: 'Inter', sans-serif;
+  background-color: #121212;
+  color: #f5f5f5;
+}
+
+body::-webkit-scrollbar {
+  width: 8px;
+}
+
+body::-webkit-scrollbar-track {
+  background: #111; /* dark track */
+}
+
+body::-webkit-scrollbar-thumb {
+  background-color: #444; /* dark thumb */
+  border-radius: 4px;
+}
+
+
+/* Header */
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;  /* Vertically centers the content */
+  padding: 20px;
+  background: #1e1e2f;
+  flex-wrap: wrap;
+}
+header h1 {
+  margin: 0;
+}
+
+/* Weather widget */
+#weather-widget {
+  display: flex;
+  align-items: center;  /* vertical center all children */
+  gap: 12px;
+  padding: 8px 14px;
+  border-radius: 12px;
+  background: #2a2a3b;
+  color: #fff;
+  font-size: 0.95rem;
+  font-weight: 600;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+  transition: background 0.3s ease;
+}
+
+#weather-widget span {
+  line-height: 1;   /* ensures emoji and text are vertically centered */
+}
+
+#weather-widget:hover {
+  background: #33334a;
+}
+
+#weather-icon {
+  font-size: 1.3rem;
+}
+
+
+#loading-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.85);
+  color: white;
+  font-size: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.spinner {
+  border: 6px solid rgba(255, 255, 255, 0.2); /* light background */
+  border-top: 6px solid white;                 /* spinner color */
+  border-radius: 50%;
+  width: 50px;
+  height: 50px;
+  animation: spin 1s linear infinite;
+  margin-bottom: 15px;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+#loading-overlay.hidden {
+  display: none; /* hide overlay */
+}
+
+/* KPI Cards */
+/* Wrapper to align everything consistently */
+.content-wrapper {
+  width: 95%;
+  margin: 0 auto;
+}
+
+/* KPI Cards */
+.cards {
+  display: flex;
+  justify-content: space-between;
+  margin: 20px 0;   /* keeps even space above and below */
+  flex-wrap: wrap;
+}
+
+.card {
+  background: #2a2a3b;
+  padding: 20px;
+  border-radius: 12px;
+  flex: 1;
+  min-width: 180px;
+  margin: 0 10px;   /* keeps equal spacing between cards */
+  text-align: center;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+
+  /* for two-line structure */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.cards .card:first-child {
+  margin-left: 0;
+}
+.cards .card:last-child {
+  margin-right: 0;
+}
+
+
+/* label (first line) */
+.kpi-label {
+  font-size: 0.95rem;
+  color: #bfc3d6;
+  margin-bottom: 8px;
+  text-align: center;
+  line-height: 1.2;
+}
+
+/* value line (second line) */
+.kpi-value {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 6px;
+}
+
+.value {
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.unit {
+  font-size: 1rem;
+  color: #bfc3d6;
+}
+
+
+/* Chart + Alerts Layout */
+.main-section {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  margin: 20px 0;
+}
+#chart-container {
+  flex: 2;
+  min-width: 300px;
+  background: #2a2a3b;
+  padding: 20px;
+  border-radius: 12px;
+  max-height: 350px; /* reduced height */
+}
+
+#chart-container {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+#energyChart {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+
+
+#alerts {
+  flex: 1;
+  min-width: 200px;
+  background: #2a2a3b;
+  padding: 20px;
+  border-radius: 12px;
+  max-height: 350px; /* same as chart */
+  overflow-y: auto;
+}
+#alerts h2 {
+  margin-top: 0;
+  color: #ffcc00;
+}
+#alerts ul {
+  list-style: none;
+  padding: 0;
+}
+#alerts li {
+  margin: 8px 0;
+}
+
+/* Table */
+/* Table Wrapper */
+.table-wrapper {
+  width: 100%;
+  margin: 20px 0;
+  background: #2a2a3b;
+  border-radius: 12px;
+  overflow: hidden;
+  max-height: 400px;       /* scrollable height */
+  overflow-y: auto;
+}
+
+.table-wrapper::-webkit-scrollbar {
+  width: 8px;  /* scrollbar width */
+}
+
+.table-wrapper::-webkit-scrollbar-track {
+  background: #111;  /* track color */
+}
+
+.table-wrapper::-webkit-scrollbar-thumb {
+  background-color: #444; /* thumb color */
+  border-radius: 4px;
+}
+
+/* Table */
+table {
+  width: 100%;             /* full width */
+  border-collapse: collapse;
+}
+thead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+th, td {
+  padding: 12px;
+  border-bottom: 1px solid #444;
+  text-align: center;
+}
+th {
+  background: #1e1e2f;
+}
+
+/* Zebra stripes */
+tbody tr:nth-child(even) {
+  background: #242434;
+}
+tbody tr:nth-child(odd) {
+  background: #2a2a3b;
+}
+
+/* Status colors */
+.status-online {
+  color: #4caf50;   /* green */
+  font-weight: 600;
+}
+.status-offline {
+  color: #f44336;   /* red */
+  font-weight: 600;
+}
+.status-warning {
+  color: #ff9800;   /* orange/yellow */
+  font-weight: 600;
+}
+
+/* Responsive adjustments */
+@media (max-width: 1024px) {
+  .main-section {
+    flex-direction: column;
+  }
+}

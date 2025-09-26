@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Energy Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    body {
+      margin: 0;
+      font-family: 'Inter', sans-serif;
+      background-color: #121212;
+      color: #f5f5f5;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      padding: 20px;
+      background: #1e1e2f;
+    }
+    .cards {
+      display: flex;
+      justify-content: space-around;
+      margin: 20px;
+    }
+    .card {
+      background: #2a2a3b;
+      padding: 20px;
+      border-radius: 12px;
+      flex: 1;
+      margin: 0 10px;
+      text-align: center;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+    }
+    #chart-container {
+      margin: 20px;
+      padding: 20px;
+      background: #2a2a3b;
+      border-radius: 12px;
+    }
+    table {
+      width: 95%;
+      margin: 20px auto;
+      border-collapse: collapse;
+      background: #2a2a3b;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    th, td {
+      padding: 12px;
+      border-bottom: 1px solid #444;
+      text-align: center;
+    }
+    th {
+      background: #1e1e2f;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Energy Dashboard</h1>
+    <div id="weather">🌤 20°C Porto</div>
+  </header>
+
+  <section class="cards">
+    <div class="card" id="prod">Production: -- kW</div>
+    <div class="card" id="cons">Consumption: -- kW</div>
+    <div class="card" id="grid">Grid: -- kW</div>
+  </section>
+
+  <section id="chart-container">
+    <canvas id="energyChart"></canvas>
+  </section>
+
+  <section>
+    <table>
+      <thead>
+        <tr>
+          <th>Building</th>
+          <th>Consumption (kW)</th>
+          <th>Production (kW)</th>
+          <th>Grid (kW)</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody id="buildingTable">
+        <!-- rows will be injected via JS -->
+      </tbody>
+    </table>
+  </section>
+
+  <script>
+    // Chart.js setup
+    const ctx = document.getElementById('energyChart').getContext('2d');
+    const energyChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [], // time slots
+        datasets: [
+          { label: 'Production', data: [], borderColor: 'lime', fill: false },
+          { label: 'Consumption', data: [], borderColor: 'orange', fill: false }
+        ]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { labels: { color: 'white' } } },
+        scales: { x: { ticks: { color: 'white' } }, y: { ticks: { color: 'white' } } }
+      }
+    });
+
+    // Example: Fetch data from Flask API every 10 min
+    async function fetchData() {
+      const response = await fetch('/api/energy'); // Flask route
+      const data = await response.json();
+
+      // Update cards
+      document.getElementById('prod').innerText = `Production: ${data.total.production} kW`;
+      document.getElementById('cons').innerText = `Consumption: ${data.total.consumption} kW`;
+      document.getElementById('grid').innerText = `Grid: ${data.total.grid} kW`;
+
+      // Update chart
+      energyChart.data.labels = data.chart.labels;
+      energyChart.data.datasets[0].data = data.chart.production;
+      energyChart.data.datasets[1].data = data.chart.consumption;
+      energyChart.update();
+
+      // Update table
+      const tbody = document.getElementById('buildingTable');
+      tbody.innerHTML = '';
+      data.buildings.forEach(b => {
+        tbody.innerHTML += `
+          <tr>
+            <td>${b.name}</td>
+            <td>${b.consumption}</td>
+            <td>${b.production}</td>
+            <td>${b.grid}</td>
+            <td>${b.status}</td>
+          </tr>`;
+      });
+    }
+
+    fetchData();
+    setInterval(fetchData, 600000); // refresh every 10 min
+  </script>
+</body>
+</html>

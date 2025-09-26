@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <script src="https://unpkg.com/lottie-web/build/player/lottie.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  
+  <!-- Title / Subtitle (fixed for both pages) -->
+  <div class="title-box">
+    <div class="title-text">
+      <div>Mercado Abastecedor do Porto</div>
+      <div class="subtitle">		
+        <span class="location" style="color: #5FF1FF; font-weight: bold;">Porto</span>
+        &nbsp;&nbsp;|&nbsp;&nbsp;
+
+        <span class="icon-text" style="color: #FFFFFF;">
+          <img src="{{ url_for('static', filename='calendar_icon.png') }}" alt="Data" class="icon-calendar">
+          <span id="current-date">--/--/----</span>
+        </span>
+        &nbsp;&nbsp;|&nbsp;&nbsp;
+
+        <span class="icon-text" style="color: #FFFFFF;">
+          <img src="{{ url_for('static', filename='time_icon.png') }}" alt="Hora" class="icon-clock">
+          <span id="current-time">--:--</span>
+        </span>
+        &nbsp;&nbsp;|&nbsp;&nbsp;
+
+        <span class="icon-text" style="color: #FFFFFF;">
+          <img src="{{ url_for('static', filename='weather_icon.png') }}" alt="Clima" class="icon-weather">
+          <span id="weather">--°C</span>
+        </span>
+      </div>
+    </div>
+  </div>
+  <div class="logo-container">
+    <img src="{{ url_for('static', filename='logo.svg') }}" alt="ADEPorto Logo">
+    <img src="{{ url_for('static', filename='maplogo.png') }}" alt="Map Logo" class="logo">
+  </div>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link href="https://fonts.googleapis.com/css2?family=Merriweather:wght@400;600&display=swap" rel="stylesheet">
+
+  <style>
+    /* New styles for sliding pages */
+    .pages-wrapper {
+      display: flex;
+      width: 200%;
+      transition: transform 0.8s ease-in-out;
+    }
+
+    .page {
+      width: 50%;
+      padding: 20px;
+      box-sizing: border-box;
+    }
+
+    .page-1 {
+      /* Same styling as your current background/content */
+    }
+
+    .page-2 {
+      /* Same background, empty for now */
+    }
+
+    .content-container {
+      overflow: hidden; /* hides the other page when sliding */
+    }
+	
+  </style>
+</head>
+<body>
+
+  <div class="content-container">
+    <div class="pages-wrapper" id="pagesWrapper">
+
+      <!-- PAGE 1 -->
+      <div class="page page-1">
+        <div class="content">
+          <div class="animation-wrapper">
+            <div id="full-animation" class="full-animation"></div>
+            <div id="full-animation2" class="full-animation"></div>
+
+            <!-- BOX 1 - Production -->
+            <div id="production-box" class="data-box">
+              <div class="box-header">
+                <span class="box-title">
+                  <img src="/static/solar_icon.png" alt="Energia Solar" class="icon-sun">
+                  Energia Solar
+                </span>
+                <div class="box-mini" id="production-percentage">--% do Consumo Atual</div>
+              </div>
+              <div class="box-content">
+                <div class="box-side left-side">
+                  <div class="value-row"><span id="production">--</span><span class="unit">kW</span></div>
+                  <div class="desc-row">Produção Atual</div>
+                </div>
+                <div class="divider"></div>
+                <div class="box-side right-side">
+                  <div class="value-row"><span id="production-energy">--</span><span class="unit">kWh</span></div>
+                  <div class="desc-row">Produção Diária</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- BOX 2 - Consumption -->
+            <div id="consumption-box" class="data-box">
+              <div class="box-header">
+                <span class="box-title">
+                  <img src="/static/consumption_icon.png" alt="Consumo" class="icon-consumption">
+                  Consumo
+                </span>
+                <div class="box-mini" id="consumption-percentage">--%</div>
+              </div>
+              <div class="box-content">
+                <div class="box-side left-side">
+                  <div class="value-row"><span id="consumption">--</span><span class="unit">kW</span></div>
+                  <div class="desc-row">Consumo Atual</div>
+                </div>
+                <div class="divider"></div>
+                <div class="box-side right-side">
+                  <div class="value-row"><span id="consumption-energy">--</span><span class="unit">kWh</span></div>
+                  <div class="desc-row">Consumo Diário</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- BOX 3 - Grid -->
+            <div id="grid-box" class="data-box">
+              <div class="box-header">
+                <span class="box-title">
+                  <img src="/static/grid_icon.png" alt="Rede Elétrica" class="icon-grid">
+                  Rede Elétrica
+                </span>
+                <div class="box-mini" id="grid-percentage">--%</div>
+              </div>
+              <div class="box-content">
+                <div class="box-side left-side">
+                  <div class="value-row"><span id="grid">--</span><span class="unit">kW</span></div>
+                  <div class="desc-row" id="grid-label">a injetar na rede</div>
+                </div>
+                <div class="divider"></div>
+                <div class="box-side right-side">
+                  <div class="value-row"><span id="grid-energy">--</span><span class="unit">kWh</span></div>
+                  <div class="desc-row">Excedente Diário</div>
+                </div>
+              </div>
+            </div>
+
+            <div id="energy-text" class="energy-text">
+              <span class="energy-normal">A nossa</span> <span class="energy-highlight">energia</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- PAGE 2 -->
+      <div class="page page-2">
+		  <div class="content page2-container">
+			<div class="page2-layout">
+
+			  <!-- Left large box for chart -->
+			  <div class="large-plot-box">
+				<div class="box-header">
+				  <span class="large-box-title">Produção Mensal</span>
+				</div>
+				<div class="plot-area">
+				  <canvas id="monthlyChart" style="width:100%; height:300px;"></canvas>
+				</div>
+			  </div>
+
+			  <!-- Right grid of 6 small boxes -->
+			  <div class="small-boxes-grid">
+			    <div id="box1" class="small-box data-box">
+				  <img src="/static/total_yeld_icon.png" alt="Icon 1" class="small-box-icon">
+				  <div class="small-box-value">--</div>
+				  <div class="small-box-text">Total energia produzida</div>
+			    </div>
+
+			    <div id="box2" class="small-box data-box">
+				  <img src="/static/emissions_icon.png" alt="Icon 2" class="small-box-icon">
+				  <div class="small-box-value">--</div>
+				  <div class="small-box-text">Redução total de emissões de CO2</div>
+			    </div>
+
+			    <div id="box3" class="small-box data-box">
+				  <img src="/static/total_yeld_icon.png" alt="Icon 3" class="small-box-icon">
+				  <div class="small-box-value">--</div>
+				  <div class="small-box-text">Energia produzida este ano</div>
+			    </div>
+
+			    <div id="box4" class="small-box data-box">
+				  <img src="/static/emissions_icon.png" alt="Icon 4" class="small-box-icon">
+				  <div class="small-box-value">--</div>
+				  <div class="small-box-text">Redução de emissões de CO2 este ano</div>
+			    </div>
+
+			    <div id="box5" class="small-box data-box">
+				  <img src="/static/total_sun_icon.png" alt="Icon 5" class="small-box-icon">
+				  <div class="small-box-value">--</div>
+				  <div class="small-box-text">Autoconsumo mensal médio este ano</div>
+			    </div>
+
+			    <div id="box6" class="small-box data-box">
+				  <img src="/static/total_grid_icon.png" alt="Icon 6" class="small-box-icon">
+				  <div class="small-box-value">--</div>
+				  <div class="small-box-text">Energia injetada na rede este ano</div>
+			    </div>
+			  </div>
+
+			</div>
+		  </div>
+		</div>
+  </div>
+  </div>
+  <script>
+    let currentPage = 0;
+    setInterval(() => {
+      currentPage = (currentPage + 1) % 2;
+      document.getElementById('pagesWrapper').style.transform = `translateX(-${currentPage * 50}%)`;
+    }, 30000); // Switch every 30s
+  </script>
+
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
+
+
+
+

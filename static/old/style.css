@@ -1,0 +1,502 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+/* Reset + full screen gradient background */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+  font-family: 'Merriweather', serif;
+  background: url("/static/Background.svg") no-repeat center center fixed;
+  background-size: cover;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: start;
+}
+
+/* Title styling */
+h1 {
+  margin: 1vh 0;
+  font-size: 3vh;
+  color: #333;
+}
+
+.title-box {
+  position: absolute;
+  top: 2vh;
+  left: 2vw;
+  background-color: #2B54BA;
+  border-radius: 1.5vh;
+  padding: 2vh 3vw;
+  color: white;
+  font-family: 'Arial', sans-serif;
+  max-width: 60vw;
+  z-index: 10;
+}
+
+.title-text > div:first-child {
+  font-size: 4vh;
+  font-weight: bold;
+  margin-bottom: 0.5vh;
+}
+
+.subtitle {
+  font-size: 3vh;
+  font-weight: normal;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* Main content area */
+.content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 1;
+  justify-content: center;
+  width: 100%;
+}
+
+
+.production-text {
+  font-size: 2.2vh;
+  font-weight: bold;
+  color: #444;
+}
+
+
+
+.school-icon {
+  width: 80vh; /* Adjust as needed */
+  height: auto;
+}
+
+
+/* Text */
+.info-text {
+  font-size: 2vh;
+  font-weight: bold;
+  color: #2c3e50;
+  max-width: 10vw;
+  text-align: center;
+}
+
+/* Grid label */
+#grid-label {
+  display: block; 
+  font-weight: bold;  
+  font-size: 1.2rem;
+  color: #333;
+  margin-top: 4px;
+}
+
+@keyframes pulse {
+  0%, 100% { text-shadow: 0 0 8px #f39c12; }
+  50% { text-shadow: 0 0 16px #f1c40f; }
+}
+
+.data-box {
+  font-family: 'Inter', sans-serif;
+  width: 700px;
+  min-height: 170px;
+  background: linear-gradient(to bottom, #F5F8FA, #E6F0F4);
+  border: 2px solid white;
+  border-radius: 12px;
+  padding: 18px;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+  display: flex;
+  flex-direction: column;
+}
+
+.box-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  font-size: 1.8rem;
+}
+
+.box-title {
+  color: #3A6FF5;
+}
+
+.box-mini {
+  background-color: #3A6FF5;
+  color: white;
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-size: 0.9rem;  /* smaller font */
+  font-weight: 600;
+  width: 220px;     /* fixed width */
+  height: 28px;     /* fixed height */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap; /* prevent wrapping */
+}
+
+
+/* FIXED: dot instead of slash */
+.box-content {
+  display: flex; /* makes divider work */
+  flex: 1;
+  align-items: stretch; /* makes children fill height */
+}
+
+.box-side {
+  flex: 1;
+  padding: 0 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center; /* centers text under numbers */
+}
+
+.divider {
+  width: 1px;
+  background-color: #D6E2FD;
+  margin: -10px 0 8px;
+  align-self: stretch; /* makes it span full height of flex row */
+  
+}
+
+.value-row {
+  font-size: 2.8rem; /* larger numbers */
+  font-weight: 700;
+  color: black;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+}
+
+.value-row .unit {
+  font-size: 2rem;
+  font-weight: 600;
+  margin-left: 6px;
+}
+
+.desc-row {
+  font-size: 1.2rem;
+  color: #333;
+  margin-top: 4px;
+}
+
+
+
+.extra-info {
+  margin-top: 6px;
+  font-size: 1rem;
+  font-weight: normal;
+  color: black;
+  display: none;
+}
+
+.extra-info {
+  display: none;
+}
+
+.extra-info .highlighted-line {
+  font-weight: bold;
+  font-size: 1.6em; /* Or larger if you prefer */
+}
+
+.logo-container {
+  position: absolute;
+  top: 2vh;
+  right: 2vw;
+  z-index: 20;
+  display: flex;
+  gap: 2vh; /* Adds space between logos */
+  align-items: center;
+}
+
+.logo-container img {
+  height: 5vh; /* You can tweak this per logo if needed */
+  width: auto;
+}
+
+.logo-container img.logo {
+  height: 6vh;     /* tweak this to your desired size */
+  width: auto;
+}
+
+/* Full animation container */
+.animation-wrapper {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.full-animation {
+  position: absolute;
+  bottom: 0;
+  left: 60%;
+  transform: translate(-59%, 0%); /* <--- Move slightly left & up */
+  width: 80vw;  /* Adjust size as needed */
+  height: auto;
+  z-index: 1;
+  pointer-events: none;
+}
+
+#production-box,
+#consumption-box,
+#grid-box {
+  position: absolute;
+  font-weight: 600;
+  font-size: 1.2rem;
+  background: rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(4px); /* adds soft glass effect */
+  padding: 10px 15px;
+  border-radius: 10px;
+  transition: all 0.5s ease;
+  cursor: pointer;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+}
+
+#production-box {
+  top: 30%;     /* adjust to match sun in animation */
+  left: 8%;     /* touch left of screen */
+}
+
+#consumption-box {
+  top: 52%;  /* adjust to school position */
+  left: 8%;    /* center of screen */
+}
+
+#grid-box {
+  top: 74%;  /* adjust near bottom */
+  left: 8%;    /* near the grid section */
+}
+
+.energy-value {
+  display: block;
+  font-size: 3rem;
+  font-weight: bold;
+  margin-bottom: 2px;
+}
+
+.extra-animation {
+  display: none;
+  width: 100%;
+  max-width: 150px;
+  margin: 0 auto 6px auto; 
+  text-align: center;
+}
+
+
+.energy-text {
+  position: absolute;
+  top: 200px;     /* distance from top */
+  left: 41px;     /* distance from left */
+  font-size: 2rem;
+  font-family: 'Merriweather', serif;
+  color: white;   /* fallback / inherited color */
+  font-weight: 600;
+  max-width: 800px;
+  z-index: 5;     /* make sure it appears above animations */
+}
+
+.energy-text .energy-normal {
+  color: #000000;   /* "A nossa" em preto */
+}
+
+.energy-text .energy-highlight {
+  color: #3A6FF5;   /* "energia" em #3A6FF5 */
+}
+
+.icon-text img {
+  vertical-align: middle;
+  margin-right: 4px;
+  position: relative;
+  top: -4px; /* Move upward by 2 pixels */
+}
+
+.icon-calendar {
+  width: 28px;
+  height: 28px;
+}
+
+.icon-clock {
+  width: 28px;
+  height: 28px;
+}
+
+.icon-weather {
+  width: 32px;
+  height: 28px;
+}
+
+.icon-sun {
+  width: 35px;      /* Adjust size */
+  height: 35px;     /* Adjust size */
+  vertical-align: middle;
+  margin-right: 6px;
+  position: relative;
+  top: -2px;        /* Move up/down if needed */
+}
+
+.icon-consumption {
+  width: 35px;      /* Adjust size */
+  height: 35px;     /* Adjust size */
+  vertical-align: middle;
+  margin-right: 6px;
+  position: relative;
+  top: -2px;        /* Move up/down if needed */
+}
+
+.icon-grid {
+  width: 35px;      /* Adjust size */
+  height: 35px;     /* Adjust size */
+  vertical-align: middle;
+  margin-right: 6px;
+  position: relative;
+  top: -2px;        /* Move up/down if needed */
+}
+
+/* PAGE 2 ---------------------------------------------------------------------------------------------------------------*/
+
+/* Make the sliding wrapper and pages full height */
+.pages-wrapper { height: 100vh; }
+.page { width: 50%; height: 100vh; }
+
+/* Page 2 container with 10% margins on both sides */
+.page2-container {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;        /* vertical centering */
+  justify-content: center;    /* horizontal centering */
+  padding-left: 0;            /* remove previous padding */
+  padding-right: 0;
+  margin-top: 50px; /* adjust pixels as needed */
+}
+
+/* Two-column layout inside page 2 */
+.page2-layout {
+  display: grid;
+  grid-template-columns: 1.5fr 1fr; 
+  gap: 24px;
+  width: auto;        /* shrink to fit content */
+  max-width: 1800px;  /* optional max width */
+}
+
+/* Reuse the same visual style as data boxes on page 1 */
+.page-2 .data-box {
+  width: 100%;           /* override fixed 700px width from .data-box */
+  min-height: 0;         /* allow flexible sizing */
+}
+
+/* Left large plot box height */
+.large-plot-box {
+  min-height: 50vh;      /* nice big area; adjust as you like */
+  display: flex;
+  max-width: 1000px;
+  width: 100%;
+  background: rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(4px); /* adds soft glass effect */
+  border: 2px solid white;
+  border-radius: 12px;
+  padding: 18px;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+  flex-direction: column;
+}
+
+.page-2 .large-box-title {
+  font-family: 'Inter', sans-serif;  /* same font as Page 1 */
+  font-size: 1.8rem;                 /* slightly larger for big box */
+  font-weight: 700;                   /* bold like Page 1 */
+  color: #3A6FF5;                     /* primary accent color */
+  margin: 0;                          /* remove default span margin */
+  line-height: 1.2;                   /* vertical spacing */
+}
+
+/* Plot area filler (placeholder) */
+.plot-area {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed rgba(58, 111, 245, 0.25);
+  border-radius: 10px;
+  margin-top: 12px;
+  font-weight: 600;
+}
+
+/* Right grid: 2 columns × 3 rows of equal boxes */
+.small-boxes-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-auto-rows: 1fr;   /* equal heights */
+  gap: 16px;
+  height: 70vh;          /* matches left box visually */
+}
+
+/* Mini boxes inherit .data-box style (gradient, border, shadow) */
+.small-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;         /* allow grid to control height */
+  background: rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(4px); /* adds soft glass effect */
+  border: 2px solid white;
+  border-radius: 12px;
+  padding: 18px;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+  padding: 16px;
+  text-align: center;
+}
+
+/* Icon + value + text inside small boxes */
+.small-box-icon {
+  width: 80px;
+  height: 80px;
+  margin-bottom: 8px;
+}
+
+.small-box-value {
+  font-size: 2rem;
+  font-weight: 700;
+  color: black;
+  line-height: 1.1;
+}
+
+.small-box-text {
+  margin-top: 4px;
+  font-size: 1rem;
+  color: #333;
+  font-weight: bold;
+}
+
+/* Ensure Page 2 doesn't inherit Page 1's absolute-position behavior */
+.page-2 #production-box,
+.page-2 #consumption-box,
+.page-2 #grid-box {
+  position: static;
+  box-shadow: none;
+  background: none;
+  padding: 0;
+  border: 0;
+}
+
+.unit {
+  font-size: 0.8em;   /* Smaller than the main number */
+}
+
+.unit sub {
+  font-size: 0.7em;   /* Smaller than letters */
+  vertical-align: sub;
+}
+
+#monthlyChart {
+  height: 380px; /* make chart taller */
+}
