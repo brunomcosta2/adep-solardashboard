@@ -1,10 +1,38 @@
+# -*- coding: utf-8 -*-
+import sys
+import io
+# Set UTF-8 encoding for stdout/stderr to handle emojis on Windows
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
 from flask import Flask, render_template, jsonify, send_from_directory
 import time
+import logging
 from datetime import datetime
 from fusion_solar_py.client import FusionSolarClient
+from fusion_solar_py.exceptions import FusionSolarException
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+
+_LOGGER = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+# Hybrid approach: Session pool + Data cache (optimized for Raspberry Pi)
+# Session pool maintains persistent connections to reduce logins
+# Using lazy approach: only check/keepalive when actually fetching data (not proactively)
+_session_pool = {}  # account_name -> {"client": client, "last_used": timestamp, "lock": threading.Lock()}
+# Note: We don't proactively keepalive. The @logged_in decorator handles session validation.
+# Sessions are checked/refreshed only when we fetch data (every 5 min with cache)
+
+# Data cache reduces API calls for data fetching
+_data_cache = {
+    "data": None,
+    "timestamp": 0,
+    "lock": threading.Lock()
+}
+CACHE_DURATION = 5 * 60  # 5 minutes in seconds
 
 #Configuration
 accounts = [
@@ -16,24 +44,56 @@ accounts = [
 ]
 
 def custom_get_station_list(self) -> list:
-    r = self._session.post(
-        url=f"https://{self._huawei_subdomain}.fusionsolar.huawei.com/rest/pvms/web/station/v1/station/station-list",
-        json={
-            "curPage": 1,
-            "pageSize": 50,  # increased limit
-            "gridConnectedTime": "",
-            "queryTime": self._get_day_start_sec(),
-            "timeZone": 2,
-            "sortId": "createTime",
-            "sortDir": "DESC",
-            "locale": "en_US"
-        }
-    )
-    r.raise_for_status()
-    obj_tree = r.json()
-    if not obj_tree["success"]:
-        raise Exception("Failed to retrieve station list")
-    return obj_tree["data"]["list"]
+    """Get all stations with pagination support"""
+    all_stations = []
+    page_size = 50
+    cur_page = 1
+    
+    while True:
+        r = self._session.post(
+            url=f"https://{self._huawei_subdomain}.fusionsolar.huawei.com/rest/pvms/web/station/v1/station/station-list",
+            json={
+                "curPage": cur_page,
+                "pageSize": page_size,
+                "gridConnectedTime": "",
+                "queryTime": self._get_day_start_sec(),
+                "timeZone": 2,
+                "sortId": "createTime",
+                "sortDir": "DESC",
+                "locale": "en_US"
+            }
+        )
+        r.raise_for_status()
+        obj_tree = r.json()
+        if not obj_tree["success"]:
+            raise Exception("Failed to retrieve station list")
+        
+        stations = obj_tree["data"]["list"]
+        if not stations:  # No more stations
+            break
+            
+        all_stations.extend(stations)
+        
+        # Check if there are more pages
+        total = obj_tree["data"].get("total", 0)
+        total_pages = obj_tree["data"].get("pageCount", 0)
+        
+        # If we got fewer stations than page_size, we're on the last page
+        if len(stations) < page_size:
+            break
+            
+        # If total_pages is provided and we've reached it, stop
+        if total_pages > 0 and cur_page >= total_pages:
+            break
+            
+        # If we've fetched all stations based on total count, stop
+        if total > 0 and len(all_stations) >= total:
+            break
+            
+        cur_page += 1
+    
+    print(f"Fetched {len(all_stations)} stations (across {cur_page} page(s))")
+    return all_stations
 
 # Monkey-patch the class
 FusionSolarClient.get_station_list = custom_get_station_list
@@ -341,6 +401,13 @@ def get_plant_stats(
     # return the plant data
     return plant_data["data"]
 
+# Monkey-patch additional methods to FusionSolarClient
+FusionSolarClient.get_current_plant_data = get_current_plant_data
+FusionSolarClient.get_plant_stats_yearly = get_plant_stats_yearly
+FusionSolarClient.get_plant_stats_monthly = get_plant_stats_monthly
+FusionSolarClient.get_power_status = get_power_status
+FusionSolarClient.get_plant_stats = get_plant_stats
+
 error_messages = {
             1: "Instalação Desligada",
             2: "Sem Consumo",
@@ -348,6 +415,58 @@ error_messages = {
             4: "Erro de Comunicação"
         }
 
+
+def get_or_create_client(account):
+    """
+    Get existing client from session pool or create new one.
+    Lazy approach: Only checks/creates session when needed (not proactively).
+    The @logged_in decorator on API methods will auto-re-authenticate if session expired.
+    This reduces processing load on Raspberry Pi devices.
+    """
+    USER, PASSWORD, SUBDOMAIN = account
+    current_time = time.time()
+    
+    # Initialize session pool entry if it doesn't exist
+    if USER not in _session_pool:
+        _session_pool[USER] = {
+            "client": None,
+            "last_used": 0,
+            "lock": threading.Lock()
+        }
+    
+    with _session_pool[USER]["lock"]:
+        client = _session_pool[USER]["client"]
+        
+        # Only create new client if we don't have one
+        # The @logged_in decorator will handle session validation and re-auth when needed
+        if client is None:
+            try:
+                print(f"🔑 Creating session for {USER}...")
+                client = FusionSolarClient(USER, PASSWORD, huawei_subdomain=SUBDOMAIN)
+                _session_pool[USER]["client"] = client
+                _session_pool[USER]["last_used"] = current_time
+                print(f"Session created successfully ✅")
+            except Exception as e:
+                print(f"Erro ao criar sessão para {USER}: {e}")
+                raise
+        
+        # Update last used timestamp
+        _session_pool[USER]["last_used"] = current_time
+        
+        # Lazy keepalive: Only call keep_alive() when we're about to use the session
+        # This is more efficient than proactive keepalive, but ensures session stays alive
+        # Since we fetch data every 5 minutes (cache), this is sufficient
+        try:
+            # The @logged_in decorator will handle re-auth if session expired
+            # But we also call keep_alive() to explicitly maintain the session
+            # This is safe because @logged_in will re-auth if keep_alive() fails
+            client.keep_alive()
+        except Exception:
+            # If keep_alive fails, @logged_in decorator will handle it on next API call
+            # No need to handle here - let the decorator do its job
+            pass
+        
+        return client
 
 def process_account(account):
     USER, PASSWORD, SUBDOMAIN = account
@@ -365,17 +484,27 @@ def process_account(account):
     }
 
     try:
-        print(f"🔑 Logging in as {USER}...")
-        client = FusionSolarClient(USER, PASSWORD, huawei_subdomain=SUBDOMAIN)
-        print("Login bem-sucedido! ✅")
+        try:
+            client = get_or_create_client(account)
+        except Exception as login_error:
+            error_msg = str(login_error)
+            print(f"Erro no login da conta {USER}: {error_msg}")
+            result["alerts"].append(f"🔴 Conta {USER} - Erro no login: {error_msg[:100]}")
+            return result
 
         plants = client.get_station_list()
         if not plants:
-            print(f"⚠️ Nenhuma instalação encontrada para {USER}")
-            client.log_out()
+            try:
+                print(f"⚠️ Nenhuma instalação encontrada para {USER}")
+            except (UnicodeEncodeError, UnicodeError):
+                print(f"Nenhuma instalação encontrada para {USER}")
+            # Add warning to alerts
+            result["alerts"].append(f"⚠️ Conta {USER} - Nenhuma instalação encontrada")
+            # Don't log out - keep session alive for reuse
             return result
 
         number_plants = len(plants)
+        print(f"Found {number_plants} stations for account {USER}")
         installed_capacity_map = {p["name"]: float(p["installedCapacity"]) for p in plants}
 
         for i, plant in enumerate(plants, start=1):
@@ -383,9 +512,27 @@ def process_account(account):
             plant_name = plant["name"]
             installed_capacity = installed_capacity_map.get(plant_name, 0)
 
-            print(f"A analisar instalação...{i}/{number_plants}")
-            plant_stats = client.get_plant_stats(plant_id)
-            plant_data = client.get_last_plant_data(plant_stats)
+            print(f"A analisar instalação {i}/{number_plants}: {plant_name}")
+            try:
+                plant_stats = client.get_plant_stats(plant_id)
+                plant_data = client.get_last_plant_data(plant_stats)
+            except Exception as e:
+                error_msg = str(e)
+                print(f"Erro ao buscar dados da instalação {plant_name}: {error_msg}")
+                # Continue with next plant even if this one fails
+                result["statuses"].append({
+                    "name": plant_name,
+                    "pinstalled": installed_capacity,
+                    "production": 0.0,
+                    "consumption": 0.0,
+                    "grid": 0.0,
+                    "surplus": 0.0,
+                    "status_icon": "🔴"
+                })
+                # Add detailed error message (truncated if too long)
+                error_display = error_msg[:80] + "..." if len(error_msg) > 80 else error_msg
+                result["alerts"].append(f"🔴 {plant_name} - Erro ao buscar dados: {error_display}")
+                continue
 
             production_power = float(plant_data['productPower']['value'] or 0)
             consumption_power = float(plant_data['usePower']['value'] or 0)
@@ -458,24 +605,30 @@ def process_account(account):
                 for s, prod, cons in zip(result["summed_overflow"], product_power_filtered, consumption_power_filtered)
             ]
 
-        client.log_out()
+        # Don't log out - keep session alive for reuse
+        # client.log_out()  # Commented out to maintain session
         return result
 
     except Exception as e:
-        print(f"Erro no processamento da conta {USER}: {e}")
+        error_msg = str(e)
+        print(f"Erro no processamento da conta {USER}: {error_msg}")
+        # Add account-level error to alerts so it's visible in the UI
+        result["alerts"].append(f"🔴 Conta {USER} - Erro ao processar: {error_msg[:100]}")
         return result
         
-@app.route("/api/live-data")
-def live_data():
+def _fetch_live_data():
+    """Internal function to actually fetch data from Fusion Solar API"""
     try:
         total_production = total_consumption = total_grid = total_plants = 0
         statuses = []
         zero_production_plants = []
         summed_production = summed_consumption = summed_self_consumption = summed_overflow = None
+        account_summaries = []  # Track stations per account
 
         with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = [executor.submit(process_account, acc) for acc in accounts]
+            futures = {executor.submit(process_account, acc): acc for acc in accounts}
             for f in as_completed(futures):
+                account = futures[f]
                 r = f.result()
                 total_production += r["production"]
                 total_consumption += r["consumption"]
@@ -483,7 +636,11 @@ def live_data():
                 total_plants += r["plants"]
                 statuses.extend(r["statuses"])
                 zero_production_plants.extend(r["alerts"])
-
+                account_summaries.append({
+                    "account": account[0],
+                    "plants": r["plants"]
+                })
+                
                 # merge charts
                 if r["summed_production"] is not None:
                     if summed_production is None:
@@ -497,6 +654,16 @@ def live_data():
                         summed_self_consumption = [a + b for a, b in zip(summed_self_consumption, r["summed_self_consumption"])]
                         summed_overflow = [a + b for a, b in zip(summed_overflow, r["summed_overflow"])]
 
+        # Print summary of installations per account
+        print("\n" + "="*60)
+        print("INSTALLATION SUMMARY")
+        print("="*60)
+        for summary in account_summaries:
+            print(f"  {summary['account']}: {summary['plants']} installations")
+        print(f"\n  TOTAL INSTALLATIONS: {total_plants} \n")
+        print(f"  Expected in list_of_plants: {len(list_of_plants)}")
+        print("="*60 + "\n")
+        
         alert_message = "✅ Todas as instalações estão a funcionar normalmente."
         if zero_production_plants:
             zero_production_plants.sort(key=lambda x: x.startswith("⏳"))
@@ -507,13 +674,20 @@ def live_data():
         filtered_axis = [t for t in x_axis if t <= current_time]
         n = len(filtered_axis)
 
-        if summed_production:
+        # Ensure chart data is always arrays, never None
+        if summed_production is not None:
             summed_production = summed_production[:n]
             summed_consumption = summed_consumption[:n]
             summed_self_consumption = summed_self_consumption[:n]
             summed_overflow = summed_overflow[:n]
+        else:
+            # If no chart data available, use empty arrays
+            summed_production = []
+            summed_consumption = []
+            summed_self_consumption = []
+            summed_overflow = []
 
-        return jsonify({
+        return {
             "production": round(total_production, 2),
             "consumption": round(total_consumption, 2),
             "grid": round(total_grid, 2),
@@ -528,11 +702,40 @@ def live_data():
                 "surplus": summed_overflow
             },
             "alerts": zero_production_plants
-        })
+        }
 
     except Exception as e:
         print(f"Erro no endpoint: {e}")
-        return jsonify({"error": "Erro ao carregar dados 😞"}), 500
+        return {"error": "Erro ao carregar dados 😞"}
+
+@app.route("/api/live-data")
+def live_data():
+    """API endpoint with caching to reduce Fusion Solar API calls"""
+    current_time = time.time()
+    
+    # Check if we have cached data that's still valid
+    with _data_cache["lock"]:
+        cache_age = current_time - _data_cache["timestamp"]
+        
+        if _data_cache["data"] is not None and cache_age < CACHE_DURATION:
+            # Return cached data
+            print(f"Returning cached data (age: {int(cache_age)}s)")
+            return jsonify(_data_cache["data"])
+        
+        # Cache expired or doesn't exist, fetch fresh data
+        print("Cache expired or missing, fetching fresh data from Fusion Solar API...")
+        fresh_data = _fetch_live_data()
+        
+        # Check if there was an error
+        if "error" in fresh_data:
+            # Return error immediately without caching
+            return jsonify(fresh_data), 500
+        
+        # Update cache with successful data
+        _data_cache["data"] = fresh_data
+        _data_cache["timestamp"] = current_time
+        
+        return jsonify(fresh_data)
 
 if __name__ == "__main__":
     app.run(debug=True)

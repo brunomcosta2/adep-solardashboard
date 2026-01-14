@@ -126,14 +126,20 @@ async function fetchLiveData() {
 	if (data.alerts && data.alerts.length > 0) {
 	  // Add intro sentence
 	  const intro = document.createElement("li");
-	  intro.textContent = "As seguintes instalações estão com problemas:";
+	  intro.textContent = "Alertas e problemas detectados:";
 	  intro.style.fontWeight = "bold";  // optional, make it stand out
 	  alertsList.appendChild(intro);
 
-	  // Add each problematic installation
+	  // Add each alert (installation or account-level)
 	  data.alerts.forEach(msg => {
 		const li = document.createElement("li");
 		li.textContent = msg;
+		// Style error alerts differently
+		if (msg.includes("🔴") || msg.includes("Erro")) {
+		  li.style.color = "#ff4444";
+		} else if (msg.includes("⚠️")) {
+		  li.style.color = "#ffaa00";
+		}
 		alertsList.appendChild(li);
 	  });
 	} else {
@@ -164,9 +170,17 @@ async function fetchLiveData() {
 	
 	//Chart Code
 	
-	if (data.chart) {
+	if (data.chart && 
+	    data.chart.production && 
+	    data.chart.consumption && 
+	    data.chart.self_consumption && 
+	    data.chart.surplus &&
+	    Array.isArray(data.chart.production) &&
+	    Array.isArray(data.chart.consumption) &&
+	    Array.isArray(data.chart.self_consumption) &&
+	    Array.isArray(data.chart.surplus)) {
 	  const fullLabels = generateFullDayXAxis();
-	  const currentLength = data.chart.x_axis.length;
+	  const currentLength = data.chart.x_axis ? data.chart.x_axis.length : 0;
 	
 	// --- Drop the very last available data point (if at least 2 points exist)
 	  const safeLength = currentLength > 2 ? currentLength - 2 : currentLength;
