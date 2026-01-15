@@ -9,15 +9,111 @@ if sys.platform == 'win32':
 from flask import Flask, render_template, jsonify, send_from_directory
 import time
 import logging
+from logging.handlers import RotatingFileHandler
+import os
 from datetime import datetime
 from fusion_solar_py.client import FusionSolarClient
 from fusion_solar_py.exceptions import FusionSolarException
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
+# Configure logging with timestamps and detailed formatting
+# Create logs directory if it doesn't exist
+logs_dir = 'logs'
+if not os.path.exists(logs_dir):
+    os.makedirs(logs_dir)
+
+# Create formatter
+formatter = logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# Console handler (stdout)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(formatter)
+
+# File handler with rotation (10MB per file, keep 5 backup files)
+log_file = os.path.join(logs_dir, 'app.log')
+file_handler = RotatingFileHandler(
+    log_file,
+    maxBytes=10*1024*1024,  # 10MB
+    backupCount=5,
+    encoding='utf-8'
+)
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(formatter)
+
+# Configure root logger with both handlers
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+# Clear any existing handlers to avoid duplicates
+root_logger.handlers.clear()
+root_logger.addHandler(console_handler)
+root_logger.addHandler(file_handler)
+
+# Get logger for this module
 _LOGGER = logging.getLogger(__name__)
 
+# Configure fusion_solar_py logger to capture CAPTCHA events
+fusion_solar_logger = logging.getLogger('fusion_solar_py.client')
+fusion_solar_logger.setLevel(logging.INFO)
+
+# Create a custom handler to intercept CAPTCHA-related messages from fusion_solar_py
+class CaptchaMessageHandler(logging.Handler):
+    """Custom handler to detect and log CAPTCHA-related messages from fusion_solar_py"""
+    def emit(self, record):
+        try:
+            msg = record.getMessage()
+            msg_lower = msg.lower()
+            
+            # Check for CAPTCHA-related keywords
+            captcha_keywords = ['captcha', 'solving captcha', 'verifycode', 'verification', 'solving', 'prevalidverify']
+            if any(keyword in msg_lower for keyword in captcha_keywords):
+                formatted_msg = self.format(record)
+                _LOGGER.info(f"[CAPTCHA] 🔐 CAPTCHA detected from fusion_solar_py: {msg}")
+                print(f"🔐 [CAPTCHA] {msg}")
+        except Exception:
+            # Don't let handler errors break logging
+            self.handleError(record)
+
+# Add the custom handler to fusion_solar_py logger
+captcha_handler = CaptchaMessageHandler()
+captcha_handler.setLevel(logging.INFO)
+captcha_handler.setFormatter(formatter)
+fusion_solar_logger.addHandler(captcha_handler)
+
+# Also add a filter to catch any CAPTCHA messages
+class CaptchaLogFilter(logging.Filter):
+    """Filter to detect CAPTCHA-related log messages"""
+    def filter(self, record):
+        msg = record.getMessage().lower()
+        if 'captcha' in msg or 'solving' in msg or 'verifycode' in msg:
+            # This will be caught by our handler above
+            return True
+        return True  # Allow all messages
+
+captcha_filter = CaptchaLogFilter()
+fusion_solar_logger.addFilter(captcha_filter)
+
+# Detect if running in production (gunicorn) or development
+# When gunicorn imports the app, __name__ == "app", not "__main__"
+# Also check for environment variable
+is_production = os.environ.get('FLASK_ENV') == 'production' or os.environ.get('ENVIRONMENT') == 'production'
+
 app = Flask(__name__)
+
+# Set debug mode based on environment
+# In production with gunicorn, debug should be False for security
+if is_production:
+    app.config['DEBUG'] = False
+    app.config['TESTING'] = False
+    _LOGGER.info("Running in PRODUCTION mode (debug=False)")
+else:
+    # Development mode - can use debug=True when running directly
+    app.config['DEBUG'] = True
+    _LOGGER.info("Running in DEVELOPMENT mode (debug=True)")
 
 # Hybrid approach: Session pool + Data cache (optimized for Raspberry Pi)
 # Session pool maintains persistent connections to reduce logins
@@ -33,6 +129,10 @@ _data_cache = {
     "lock": threading.Lock()
 }
 CACHE_DURATION = 5 * 60  # 5 minutes in seconds
+
+# CAPTCHA Configuration
+# Path to the captcha model file (relative to app.py location)
+CAPTCHA_MODEL_PATH = os.path.join("models", "captcha_huawei.onnx")
 
 #Configuration
 accounts = [
@@ -436,19 +536,70 @@ def get_or_create_client(account):
     
     with _session_pool[USER]["lock"]:
         client = _session_pool[USER]["client"]
+        last_used = _session_pool[USER]["last_used"]
         
         # Only create new client if we don't have one
         # The @logged_in decorator will handle session validation and re-auth when needed
         if client is None:
             try:
+                _LOGGER.info(f"[SESSION] Creating NEW session for account: {USER} (subdomain: {SUBDOMAIN})")
                 print(f"🔑 Creating session for {USER}...")
-                client = FusionSolarClient(USER, PASSWORD, huawei_subdomain=SUBDOMAIN)
+                # Initialize client with captcha support if model path is provided
+                client_kwargs = {"huawei_subdomain": SUBDOMAIN}
+                if CAPTCHA_MODEL_PATH and os.path.exists(CAPTCHA_MODEL_PATH):
+                    client_kwargs["captcha_model_path"] = CAPTCHA_MODEL_PATH
+                    _LOGGER.info(f"CAPTCHA support enabled - using model: {CAPTCHA_MODEL_PATH}")
+                    print(f"Using CAPTCHA model: {CAPTCHA_MODEL_PATH}")
+                elif CAPTCHA_MODEL_PATH:
+                    _LOGGER.warning(f"CAPTCHA model path specified but file not found: {CAPTCHA_MODEL_PATH}")
+                    print(f"⚠️  Warning: CAPTCHA model not found at {CAPTCHA_MODEL_PATH}")
+                
+                _LOGGER.info(f"[SESSION] Attempting login for account: {USER}...")
+                login_start_time = time.time()
+                
+                # Track if CAPTCHA was encountered during login
+                # The fusion_solar_py library will log "solving captcha and retrying login" if CAPTCHA is needed
+                try:
+                    client = FusionSolarClient(USER, PASSWORD, **client_kwargs)
+                except Exception as login_exc:
+                    # Check if it's a CAPTCHA-related exception
+                    error_msg = str(login_exc).lower()
+                    if 'captcha' in error_msg:
+                        _LOGGER.warning(f"[CAPTCHA] ⚠️ CAPTCHA encountered during login for {USER}: {login_exc}")
+                        print(f"🔐 [CAPTCHA] Encountered during login for {USER}")
+                    raise
+                
+                login_duration = time.time() - login_start_time
+                
+                # Longer login times (>3s) might indicate CAPTCHA was solved
+                if login_duration > 3.0:
+                    _LOGGER.info(f"[CAPTCHA] ⚠️ Login took {login_duration:.2f}s for {USER} (may indicate CAPTCHA was solved)")
+                    print(f"⚠️ Login took {login_duration:.2f}s (possibly CAPTCHA solving)")
+                
                 _session_pool[USER]["client"] = client
                 _session_pool[USER]["last_used"] = current_time
-                print(f"Session created successfully ✅")
-            except Exception as e:
-                print(f"Erro ao criar sessão para {USER}: {e}")
+                _session_pool[USER]["created_at"] = current_time
+                _LOGGER.info(f"[SESSION] ✓ Login successful for {USER} (took {login_duration:.2f}s)")
+                print(f"Session created successfully ✅ (login took {login_duration:.2f}s)")
+            except FusionSolarException as e:
+                error_msg = str(e)
+                _LOGGER.error(f"[SESSION] FusionSolar API error during login for {USER}: {error_msg}")
+                print(f"❌ FusionSolar API error for {USER}: {error_msg}")
                 raise
+            except Exception as e:
+                error_msg = str(e)
+                error_type = type(e).__name__
+                _LOGGER.error(f"[SESSION] Failed to create session for {USER} (Error type: {error_type}): {error_msg}", exc_info=True)
+                print(f"❌ Erro ao criar sessão para {USER}: {error_type}: {error_msg}")
+                raise
+        else:
+            # Reusing existing session from pool
+            session_age = current_time - last_used
+            created_at = _session_pool[USER].get("created_at", last_used)
+            total_session_age = current_time - created_at
+            
+            _LOGGER.info(f"[SESSION] Reusing existing session for {USER} (last used: {session_age:.1f}s ago, total age: {total_session_age:.1f}s)")
+            print(f"♻️  Reusing session for {USER} (last used {session_age:.0f}s ago)")
         
         # Update last used timestamp
         _session_pool[USER]["last_used"] = current_time
@@ -456,13 +607,31 @@ def get_or_create_client(account):
         # Lazy keepalive: Only call keep_alive() when we're about to use the session
         # This is more efficient than proactive keepalive, but ensures session stays alive
         # Since we fetch data every 5 minutes (cache), this is sufficient
+        _LOGGER.debug(f"[KEEPALIVE] Calling keep_alive() for {USER}...")
+        keepalive_start_time = time.time()
         try:
             # The @logged_in decorator will handle re-auth if session expired
             # But we also call keep_alive() to explicitly maintain the session
             # This is safe because @logged_in will re-auth if keep_alive() fails
             client.keep_alive()
-        except Exception:
+            keepalive_duration = time.time() - keepalive_start_time
+            _LOGGER.info(f"[KEEPALIVE] ✓ Keep-alive successful for {USER} (took {keepalive_duration:.3f}s)")
+        except FusionSolarException as keepalive_error:
+            keepalive_duration = time.time() - keepalive_start_time
+            error_msg = str(keepalive_error)
             # If keep_alive fails, @logged_in decorator will handle it on next API call
+            _LOGGER.warning(f"[KEEPALIVE] ✗ Keep-alive FAILED for {USER} (took {keepalive_duration:.3f}s): {error_msg}")
+            _LOGGER.warning(f"[KEEPALIVE] Session for {USER} may have expired. @logged_in decorator will re-authenticate on next API call.")
+            print(f"⚠️  Keep-alive failed for {USER} (session may have expired, will renew on next request)")
+            # No need to handle here - let the decorator do its job
+            pass
+        except Exception as keepalive_error:
+            keepalive_duration = time.time() - keepalive_start_time
+            error_type = type(keepalive_error).__name__
+            error_msg = str(keepalive_error)
+            _LOGGER.warning(f"[KEEPALIVE] ✗ Keep-alive exception for {USER} ({error_type}, took {keepalive_duration:.3f}s): {error_msg}")
+            _LOGGER.warning(f"[KEEPALIVE] Session for {USER} will be renewed by @logged_in decorator on next API call.")
+            print(f"⚠️  Keep-alive error for {USER}: {error_type}: {error_msg}")
             # No need to handle here - let the decorator do its job
             pass
         
@@ -485,14 +654,27 @@ def process_account(account):
 
     try:
         try:
+            _LOGGER.info(f"Processing account: {USER} (subdomain: {SUBDOMAIN})")
             client = get_or_create_client(account)
         except Exception as login_error:
             error_msg = str(login_error)
-            print(f"Erro no login da conta {USER}: {error_msg}")
+            error_type = type(login_error).__name__
+            _LOGGER.error(f"Login failed for account {USER}: {error_type} - {error_msg}", exc_info=True)
+            print(f"❌ Erro no login da conta {USER}: {error_type}: {error_msg}")
             result["alerts"].append(f"🔴 Conta {USER} - Erro no login: {error_msg[:100]}")
             return result
 
-        plants = client.get_station_list()
+        _LOGGER.info(f"Fetching station list for account: {USER}")
+        try:
+            plants = client.get_station_list()
+            _LOGGER.info(f"Successfully retrieved station list for {USER}")
+        except Exception as station_error:
+            error_msg = str(station_error)
+            error_type = type(station_error).__name__
+            _LOGGER.error(f"Failed to fetch station list for {USER}: {error_type} - {error_msg}", exc_info=True)
+            print(f"❌ Erro ao buscar lista de estações para {USER}: {error_type}: {error_msg}")
+            result["alerts"].append(f"🔴 Conta {USER} - Erro ao buscar estações: {error_msg[:100]}")
+            return result
         if not plants:
             try:
                 print(f"⚠️ Nenhuma instalação encontrada para {USER}")
@@ -512,13 +694,35 @@ def process_account(account):
             plant_name = plant["name"]
             installed_capacity = installed_capacity_map.get(plant_name, 0)
 
-            print(f"A analisar instalação {i}/{number_plants}: {plant_name}")
+            _LOGGER.debug(f"Processing plant {i}/{number_plants}: {plant_name} (ID: {plant_id})")
+            print(f"  → Analyzing installation {i}/{number_plants}: {plant_name}")
             try:
                 plant_stats = client.get_plant_stats(plant_id)
                 plant_data = client.get_last_plant_data(plant_stats)
+                _LOGGER.debug(f"Successfully retrieved data for plant: {plant_name}")
+            except FusionSolarException as e:
+                error_msg = str(e)
+                _LOGGER.error(f"FusionSolar API error fetching data for {plant_name} (ID: {plant_id}): {error_msg}")
+                print(f"    ❌ API error for {plant_name}: {error_msg}")
+                # Continue with next plant even if this one fails
+                result["statuses"].append({
+                    "name": plant_name,
+                    "pinstalled": installed_capacity,
+                    "production": 0.0,
+                    "consumption": 0.0,
+                    "grid": 0.0,
+                    "surplus": 0.0,
+                    "status_icon": "🔴"
+                })
+                # Add detailed error message (truncated if too long)
+                error_display = error_msg[:80] + "..." if len(error_msg) > 80 else error_msg
+                result["alerts"].append(f"🔴 {plant_name} - Erro ao buscar dados: {error_display}")
+                continue
             except Exception as e:
                 error_msg = str(e)
-                print(f"Erro ao buscar dados da instalação {plant_name}: {error_msg}")
+                error_type = type(e).__name__
+                _LOGGER.error(f"Error fetching data for plant {plant_name} (ID: {plant_id}): {error_type} - {error_msg}", exc_info=True)
+                print(f"    ❌ Erro ao buscar dados da instalação {plant_name}: {error_type}: {error_msg}")
                 # Continue with next plant even if this one fails
                 result["statuses"].append({
                     "name": plant_name,
@@ -537,6 +741,8 @@ def process_account(account):
             production_power = float(plant_data['productPower']['value'] or 0)
             consumption_power = float(plant_data['usePower']['value'] or 0)
             grid_power = float(plant_data['meterActivePower']['value'] or 0)
+            
+            _LOGGER.debug(f"Plant {plant_name} data - Production: {production_power} kW, Consumption: {consumption_power} kW, Grid: {grid_power} kW")
 
             # totals
             result["production"] += production_power
@@ -607,11 +813,15 @@ def process_account(account):
 
         # Don't log out - keep session alive for reuse
         # client.log_out()  # Commented out to maintain session
+        _LOGGER.info(f"Successfully processed account {USER}: {result['plants']} plants, Total production: {result['production']:.2f} kW, Total consumption: {result['consumption']:.2f} kW")
+        print(f"✓ Completed processing {USER}: {result['plants']} plants processed")
         return result
 
     except Exception as e:
         error_msg = str(e)
-        print(f"Erro no processamento da conta {USER}: {error_msg}")
+        error_type = type(e).__name__
+        _LOGGER.error(f"Unexpected error processing account {USER}: {error_type} - {error_msg}", exc_info=True)
+        print(f"❌ Erro no processamento da conta {USER}: {error_type}: {error_msg}")
         # Add account-level error to alerts so it's visible in the UI
         result["alerts"].append(f"🔴 Conta {USER} - Erro ao processar: {error_msg[:100]}")
         return result
@@ -619,6 +829,14 @@ def process_account(account):
 def _fetch_live_data():
     """Internal function to actually fetch data from Fusion Solar API"""
     try:
+        _LOGGER.info("="*60)
+        _LOGGER.info("Starting data fetch from Fusion Solar API")
+        _LOGGER.info(f"Processing {len(accounts)} accounts in parallel")
+        print("\n" + "="*60)
+        print("Starting data fetch from Fusion Solar API")
+        print(f"Processing {len(accounts)} accounts...")
+        print("="*60)
+        
         total_production = total_consumption = total_grid = total_plants = 0
         statuses = []
         zero_production_plants = []
@@ -655,13 +873,22 @@ def _fetch_live_data():
                         summed_overflow = [a + b for a, b in zip(summed_overflow, r["summed_overflow"])]
 
         # Print summary of installations per account
+        _LOGGER.info("="*60)
+        _LOGGER.info("DATA FETCH SUMMARY")
+        _LOGGER.info(f"Total production: {total_production:.2f} kW")
+        _LOGGER.info(f"Total consumption: {total_consumption:.2f} kW")
+        _LOGGER.info(f"Total grid: {total_grid:.2f} kW")
+        _LOGGER.info(f"Total installations: {total_plants}")
         print("\n" + "="*60)
         print("INSTALLATION SUMMARY")
         print("="*60)
         for summary in account_summaries:
             print(f"  {summary['account']}: {summary['plants']} installations")
-        print(f"\n  TOTAL INSTALLATIONS: {total_plants} \n")
+            _LOGGER.info(f"Account {summary['account']}: {summary['plants']} installations")
+        print(f"\n  TOTAL INSTALLATIONS: {total_plants}")
         print(f"  Expected in list_of_plants: {len(list_of_plants)}")
+        print(f"  Total Production: {total_production:.2f} kW")
+        print(f"  Total Consumption: {total_consumption:.2f} kW")
         print("="*60 + "\n")
         
         alert_message = "✅ Todas as instalações estão a funcionar normalmente."
@@ -687,6 +914,9 @@ def _fetch_live_data():
             summed_self_consumption = []
             summed_overflow = []
 
+        # Get current timestamp for last updated
+        last_updated_datetime = datetime.now()
+        
         return {
             "production": round(total_production, 2),
             "consumption": round(total_consumption, 2),
@@ -701,11 +931,16 @@ def _fetch_live_data():
                 "self_consumption": summed_self_consumption,
                 "surplus": summed_overflow
             },
-            "alerts": zero_production_plants
+            "alerts": zero_production_plants,
+            "last_updated": last_updated_datetime.strftime('%Y-%m-%d %H:%M:%S'),
+            "last_updated_timestamp": last_updated_datetime.timestamp()
         }
 
     except Exception as e:
-        print(f"Erro no endpoint: {e}")
+        error_msg = str(e)
+        error_type = type(e).__name__
+        _LOGGER.error(f"Critical error in _fetch_live_data: {error_type} - {error_msg}", exc_info=True)
+        print(f"❌ Critical error in data fetch: {error_type}: {error_msg}")
         return {"error": "Erro ao carregar dados 😞"}
 
 @app.route("/api/live-data")
@@ -718,26 +953,34 @@ def live_data():
         cache_age = current_time - _data_cache["timestamp"]
         
         if _data_cache["data"] is not None and cache_age < CACHE_DURATION:
-            # Return cached data
-            print(f"Returning cached data (age: {int(cache_age)}s)")
+            # Return cached data (keep original last_updated from when it was fetched)
+            _LOGGER.info(f"Returning cached data (age: {int(cache_age)}s, remaining: {int(CACHE_DURATION - cache_age)}s)")
+            print(f"📦 Returning cached data (age: {int(cache_age)}s)")
             return jsonify(_data_cache["data"])
         
         # Cache expired or doesn't exist, fetch fresh data
-        print("Cache expired or missing, fetching fresh data from Fusion Solar API...")
+        _LOGGER.info("Cache expired or missing, fetching fresh data from Fusion Solar API...")
+        print("🔄 Cache expired or missing, fetching fresh data from Fusion Solar API...")
         fresh_data = _fetch_live_data()
         
         # Check if there was an error
         if "error" in fresh_data:
+            _LOGGER.error("Data fetch returned error, not caching")
             # Return error immediately without caching
             return jsonify(fresh_data), 500
         
         # Update cache with successful data
         _data_cache["data"] = fresh_data
         _data_cache["timestamp"] = current_time
+        last_updated_str = fresh_data.get('last_updated', 'N/A')
+        _LOGGER.info(f"✅ Data successfully updated at {last_updated_str}. Total plants: {fresh_data.get('total_plants', 0)}")
+        print(f"✅ Data successfully updated at {last_updated_str}")
         
         return jsonify(fresh_data)
 
 if __name__ == "__main__":
+    # Only run Flask dev server if executed directly (not via gunicorn)
+    # Gunicorn imports app:app directly, so this block is skipped in production
     app.run(debug=True)
 
 
