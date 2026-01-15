@@ -162,14 +162,25 @@ async function fetchLiveData() {
     data.statuses.forEach(plant => {
       const row = document.createElement("tr");
 
+      // Grid power: positive = consuming from grid, negative = injecting to grid
+      // Show only positive values (consumption from grid), since surplus column shows injection
+      const gridConsumption = Math.max(0, plant.grid);
+      
+      // Format values with conditional styling
+      const formatValue = (value, className, showZero = true) => {
+        if (value === 0 && !showZero) return '<span class="zero-value">--</span>';
+        if (value === 0) return `<span class="zero-value">${value.toFixed(2)}</span>`;
+        return `<span class="${className}">${value.toFixed(2)}</span>`;
+      };
+      
       row.innerHTML = `
-        <td>${plant.name}</td>
-        <td>${plant.pinstalled || "--"}</td>
-        <td>${plant.production.toFixed(2)}</td>
-        <td>${plant.consumption.toFixed(2)}</td>
-		<td>${plant.grid.toFixed(2)}</td>
-        <td>${plant.surplus.toFixed(2)}</td>
-        <td>${plant.status_icon}</td>
+        <td><strong>${plant.name}</strong></td>
+        <td>${plant.pinstalled ? plant.pinstalled.toFixed(2) : "--"}</td>
+        <td>${formatValue(plant.production, "prod-value")}</td>
+        <td>${formatValue(plant.consumption, "cons-value")}</td>
+		<td>${formatValue(gridConsumption, "grid-value", false)}</td>
+        <td>${formatValue(plant.surplus, "surplus-value", false)}</td>
+        <td style="font-size: 1.2em;">${plant.status_icon}</td>
       `;
 
       tableBody.appendChild(row);

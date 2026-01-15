@@ -120,11 +120,31 @@ header h1 {
   margin: 0 10px;   /* keeps equal spacing between cards */
   text-align: center;
   box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
 
   /* for two-line structure */
   display: flex;
   flex-direction: column;
   align-items: center;
+}
+
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 15px rgba(0,0,0,0.4);
+}
+
+/* Color accents for different card types */
+#prod {
+  border-left: 4px solid #4CAF50; /* Green for production */
+}
+#cons {
+  border-left: 4px solid #FF9800; /* Orange for consumption */
+}
+#grid {
+  border-left: 4px solid #2196F3; /* Blue for grid */
+}
+#plants {
+  border-left: 4px solid #9C27B0; /* Purple for plants count */
 }
 
 .cards .card:first-child {
@@ -257,6 +277,11 @@ th, td {
 }
 th {
   background: #1e1e2f;
+  font-weight: 600;
+  color: #ffffff;
+  text-transform: uppercase;
+  font-size: 0.85rem;
+  letter-spacing: 0.5px;
 }
 
 /* Zebra stripes */
@@ -265,6 +290,16 @@ tbody tr:nth-child(even) {
 }
 tbody tr:nth-child(odd) {
   background: #2a2a3b;
+}
+
+/* Hover effect on table rows */
+tbody tr {
+  transition: background-color 0.2s ease, transform 0.1s ease;
+  cursor: pointer;
+}
+tbody tr:hover {
+  background-color: #333344 !important;
+  transform: scale(1.01);
 }
 
 /* Status colors */
@@ -278,6 +313,38 @@ tbody tr:nth-child(odd) {
 }
 .status-warning {
   color: #ff9800;   /* orange/yellow */
+  font-weight: 600;
+}
+
+/* Table value styling */
+td {
+  font-weight: 500;
+}
+
+/* Highlight zero values */
+.zero-value {
+  color: #888;
+  font-style: italic;
+}
+
+/* Production values - subtle green tint */
+.prod-value {
+  color: #81C784;
+}
+
+/* Consumption values - subtle orange tint */
+.cons-value {
+  color: #FFB74D;
+}
+
+/* Grid consumption - subtle blue tint */
+.grid-value {
+  color: #64B5F6;
+}
+
+/* Surplus values - subtle green tint */
+.surplus-value {
+  color: #4CAF50;
   font-weight: 600;
 }
 
