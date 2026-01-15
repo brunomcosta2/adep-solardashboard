@@ -117,6 +117,13 @@ async function fetchLiveData() {
 	
 	const plantsVal = document.querySelector("#plants .value");
 	if (plantsVal) plantsVal.innerText = totalPlants;
+	
+	// Update last updated timestamp
+	const lastUpdatedElem = document.getElementById("last-updated-time");
+	if (lastUpdatedElem && data.last_updated) {
+	  lastUpdatedElem.textContent = data.last_updated;
+	  lastUpdatedElem.style.color = "#4CAF50"; // Green color for successful update
+	}
 
 	// Alerts
 	
