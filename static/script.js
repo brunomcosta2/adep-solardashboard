@@ -76,16 +76,143 @@ function generateFullDayXAxis() {
 }
 
 let firstLoad = true; // track first data fetch
+let countdownInterval = null; // track countdown interval
+let nextUpdateTime = null; // track when next update should happen
+const UPDATE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes in milliseconds
+
+// Connection status tracking
+let lastSuccessfulConnection = null;
+let connectionStatus = 'unknown'; // 'connected', 'disconnected', 'unknown'
+let failedFetchCount = 0;
+
+// Auto-scroll table variables
+let scrollDirection = 1; // 1 = down, -1 = up
+let scrollSpeed = 0.5; // pixels per frame (higher = faster) - reduced further for smoother scrolling
+let scrollPause = 2000; // pause at top/bottom in milliseconds
+let isScrolling = false;
+let scrollPaused = false;
+let scrollAnimationFrame = null;
+let tableWrapper = null;
+
+// Format date/time in Portuguese/European format (DD/MM/YYYY HH:MM:SS)
+function formatDateTimePT(date) {
+  const day = String(date.getDate()).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const year = date.getFullYear();
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  const seconds = String(date.getSeconds()).padStart(2, '0');
+  return `${day}/${month}/${year} ${hours}:${minutes}:${seconds}`;
+}
+
+// Format date in Portuguese/European format (DD/MM/YYYY)
+function formatDatePT(date) {
+  const day = String(date.getDate()).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const year = date.getFullYear();
+  return `${day}/${month}/${year}`;
+}
+
+// Format time in HH:MM format
+function formatTimePT(date) {
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${hours}:${minutes}`;
+}
+
+// Start countdown timer for next update
+function startCountdown() {
+  // Clear existing interval if any
+  if (countdownInterval) {
+    clearInterval(countdownInterval);
+  }
+  
+  // Set next update time
+  nextUpdateTime = Date.now() + UPDATE_INTERVAL_MS;
+  
+  // Update countdown immediately
+  updateCountdown();
+  
+  // Update countdown every second
+  countdownInterval = setInterval(updateCountdown, 1000);
+}
+
+// Update countdown display
+function updateCountdown() {
+  const countdownElem = document.getElementById('next-update-countdown');
+  if (!countdownElem || !nextUpdateTime) return;
+  
+  const now = Date.now();
+  const remaining = Math.max(0, nextUpdateTime - now);
+  const seconds = Math.floor(remaining / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  
+  const formatted = `${minutes}:${String(secs).padStart(2, '0')}`;
+  countdownElem.textContent = `Próxima: ${formatted}`;
+  
+  // Change color based on remaining time
+  countdownElem.classList.remove('warning', 'critical');
+  if (remaining < 30000) { // Less than 30 seconds
+    countdownElem.classList.add('critical');
+  } else if (remaining < 60000) { // Less than 1 minute
+    countdownElem.classList.add('warning');
+  }
+  
+  // If countdown reached zero, restart it (shouldn't happen, but just in case)
+  if (remaining <= 0) {
+    startCountdown();
+  }
+}
+
+// Show updating indicator
+function showUpdatingIndicator() {
+  const indicator = document.getElementById('update-indicator');
+  const countdownElem = document.getElementById('next-update-countdown');
+  if (indicator) {
+    indicator.textContent = '🔄';
+    indicator.classList.add('updating');
+  }
+  // Show "Atualizando..." text during fetch
+  if (countdownElem) {
+    countdownElem.textContent = 'Atualizando...';
+    countdownElem.classList.remove('warning', 'critical');
+  }
+}
+
+// Hide updating indicator
+function hideUpdatingIndicator() {
+  const indicator = document.getElementById('update-indicator');
+  if (indicator) {
+    indicator.classList.remove('updating');
+  }
+  // Note: countdown will be restored by startCountdown() after successful fetch
+}
 
 async function fetchLiveData() {
+  // Pause auto-scroll during data fetch
+  stopAutoScroll();
+  
+  // Show updating indicator
+  showUpdatingIndicator();
   try {
     const response = await fetch("/api/live-data");
+    
+    // Check if fetch was successful (even if response has error)
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    
     const data = await response.json();
 
     if (data.error) {
       console.error("API Error:", data.error);
+      updateConnectionStatus(false);
       return;
     }
+    
+    // Successfully fetched data
+    updateConnectionStatus(true);
 
     // parse numeric values safely
     const production = Number(data.production) || 0;
@@ -118,12 +245,24 @@ async function fetchLiveData() {
 	const plantsVal = document.querySelector("#plants .value");
 	if (plantsVal) plantsVal.innerText = totalPlants;
 	
-	// Update last updated timestamp
+	// Update last updated timestamp (format in Portuguese/European format)
 	const lastUpdatedElem = document.getElementById("last-updated-time");
 	if (lastUpdatedElem && data.last_updated) {
-	  lastUpdatedElem.textContent = data.last_updated;
-	  lastUpdatedElem.style.color = "#4CAF50"; // Green color for successful update
+	  // Parse the date string (format: YYYY-MM-DD HH:MM:SS) and convert to PT format
+	  const dateParts = data.last_updated.split(' ');
+	  if (dateParts.length === 2) {
+	    const [datePart, timePart] = dateParts;
+	    const [year, month, day] = datePart.split('-');
+	    lastUpdatedElem.textContent = `${day}/${month}/${year} ${timePart}`;
+	  } else {
+	    lastUpdatedElem.textContent = data.last_updated;
+	  }
 	}
+	
+	// Hide updating indicator and reset countdown
+	hideUpdatingIndicator();
+	// Reset countdown for next update (5 minutes from now)
+	nextUpdateTime = Date.now() + UPDATE_INTERVAL_MS;
 
 	// Alerts
 	
@@ -141,12 +280,11 @@ async function fetchLiveData() {
 	  data.alerts.forEach(msg => {
 		const li = document.createElement("li");
 		li.textContent = msg;
-		// Style error alerts differently
-		if (msg.includes("🔴") || msg.includes("Erro")) {
-		  li.style.color = "#ff4444";
-		} else if (msg.includes("⚠️")) {
+		// Only style warning alerts (⚠️), not critical (🔴) - symbol is enough
+		if (msg.includes("⚠️")) {
 		  li.style.color = "#ffaa00";
 		}
+		// No color styling for 🔴 - the symbol is enough
 		alertsList.appendChild(li);
 	  });
 	} else {
@@ -173,18 +311,76 @@ async function fetchLiveData() {
         return `<span class="${className}">${value.toFixed(2)}</span>`;
       };
       
-      row.innerHTML = `
-        <td><strong>${plant.name}</strong></td>
-        <td>${plant.pinstalled ? plant.pinstalled.toFixed(2) : "--"}</td>
-        <td>${formatValue(plant.production, "prod-value")}</td>
-        <td>${formatValue(plant.consumption, "cons-value")}</td>
-		<td>${formatValue(gridConsumption, "grid-value", false)}</td>
-        <td>${formatValue(plant.surplus, "surplus-value", false)}</td>
-        <td style="font-size: 1.2em;">${plant.status_icon}</td>
-      `;
+      // Format timestamp if available
+      let timestampDisplay = "--";
+      if (plant.last_data_time) {
+        try {
+          // Convert "2026-01-15 14:30" to "15/01/2026 14:30" (PT format)
+          const [datePart, timePart] = plant.last_data_time.split(' ');
+          if (datePart && timePart) {
+            const [year, month, day] = datePart.split('-');
+            timestampDisplay = `${day}/${month}/${year} ${timePart}`;
+          } else {
+            timestampDisplay = plant.last_data_time;
+          }
+        } catch (e) {
+          timestampDisplay = plant.last_data_time;
+        }
+      }
+      
+      // If status is critical (🔴), show only name, status and timestamp
+      const isCritical = plant.status_icon === "🔴";
+      
+      if (isCritical) {
+        row.innerHTML = `
+          <td><strong>${plant.name}</strong></td>
+          <td>--</td>
+          <td>--</td>
+          <td>--</td>
+          <td>--</td>
+          <td>--</td>
+          <td style="font-size: 0.9em; color: #aaa;">${timestampDisplay}</td>
+          <td style="font-size: 1.2em;">${plant.status_icon}</td>
+        `;
+      } else {
+        row.innerHTML = `
+          <td><strong>${plant.name}</strong></td>
+          <td>${plant.pinstalled ? plant.pinstalled.toFixed(2) : "--"}</td>
+          <td>${formatValue(plant.production, "prod-value")}</td>
+          <td>${formatValue(gridConsumption, "grid-value", false)}</td>
+          <td>${formatValue(plant.consumption, "cons-value")}</td>
+          <td>${formatValue(plant.surplus, "surplus-value", false)}</td>
+          <td style="font-size: 0.9em; color: #aaa;">${timestampDisplay}</td>
+          <td style="font-size: 1.2em;">${plant.status_icon}</td>
+        `;
+      }
 
       tableBody.appendChild(row);
     });
+	
+	// Start auto-scroll after table is populated
+	// Wait a bit for DOM to update and ensure table wrapper is ready
+	setTimeout(() => {
+	  if (data.statuses.length > 0) {
+	    console.log('Auto-scroll: Table populated with', data.statuses.length, 'rows');
+	    // Ensure tableWrapper is available
+	    if (!tableWrapper) {
+	      tableWrapper = document.querySelector('.table-wrapper');
+	    }
+	    // Reset scroll position to top before starting
+	    if (tableWrapper) {
+	      tableWrapper.scrollTop = 0;
+	      // Force a small delay to ensure scroll position is set
+	      setTimeout(() => {
+	        startAutoScroll();
+	      }, 100);
+	    }
+	  } else {
+	    console.log('Auto-scroll: No data in table');
+	  }
+	}, 500); // Increased timeout to ensure DOM is fully updated
+	
+	// Connection status already updated in try/catch blocks
 	
 	//Chart Code
 	
@@ -233,14 +429,57 @@ async function fetchLiveData() {
     }	
   } catch (error) {
     console.error("Erro ao buscar dados:", error);
+    // Update connection status to disconnected
+    updateConnectionStatus(false);
+    // Hide updating indicator even on error
+    hideUpdatingIndicator();
+    // Still reset countdown so it continues (will retry in 5 minutes)
+    nextUpdateTime = Date.now() + UPDATE_INTERVAL_MS;
+  }
+}
+
+// Update connection status indicator (integrated in update widget)
+function updateConnectionStatus(success) {
+  const updateWidget = document.getElementById('update-widget');
+  const connectionIndicator = document.getElementById('connection-indicator');
+  const connectionText = document.getElementById('connection-text');
+  
+  if (!updateWidget || !connectionIndicator || !connectionText) {
+    return;
+  }
+  
+  if (success) {
+    // Successful connection to Fusion Solar API
+    connectionStatus = 'connected';
+    failedFetchCount = 0;
+    lastSuccessfulConnection = new Date();
+    
+    // Update UI
+    updateWidget.classList.remove('disconnected');
+    updateWidget.classList.add('connected');
+    connectionIndicator.textContent = '🟢';
+    connectionText.textContent = 'Online';
+  } else {
+    // Failed connection (API error, network error, etc.)
+    connectionStatus = 'disconnected';
+    failedFetchCount++;
+    
+    // Update UI
+    updateWidget.classList.remove('connected');
+    updateWidget.classList.add('disconnected');
+    connectionIndicator.textContent = '🔴';
+    connectionText.textContent = 'Offline';
   }
 }
 
 // Run once on load
 fetchLiveData();
 
+// Start countdown timer
+startCountdown();
+
 // Refresh every 5 minutes
-setInterval(fetchLiveData, 5 * 60 * 1000);
+setInterval(fetchLiveData, UPDATE_INTERVAL_MS);
 
 
 
@@ -253,25 +492,65 @@ async function fetchWeather() {
     const temperature = data.current_weather.temperature;
     const weatherCode = data.current_weather.weathercode;
 	
-
+    // WMO Weather Interpretation Codes (Open-Meteo uses WMO codes 0-99)
+    // Complete mapping for all possible weather codes
     const weatherMap = {
+        // Clear sky
         0: "/static/sunny.svg",
+        // Mainly clear
         1: "/static/partly_sunny.svg",
+        // Partly cloudy
         2: "/static/partly_cloudy.svg",
+        // Overcast
         3: "/static/cloudy.svg",
+        // Fog and depositing rime fog
         45: "/static/fog.svg",
         48: "/static/fog.svg",
+        // Drizzle: Light, moderate, dense intensity
         51: "/static/drizzle.svg",
+        53: "/static/drizzle.svg",
+        55: "/static/drizzle.svg",
+        // Freezing Drizzle: Light, moderate, dense intensity
+        56: "/static/drizzle.svg",
+        57: "/static/drizzle.svg",
+        // Rain: Slight, moderate, heavy intensity
         61: "/static/rain.svg",
+        63: "/static/rain.svg",
+        65: "/static/rain.svg",
+        // Freezing Rain: Light, moderate, heavy intensity
+        66: "/static/rain.svg",
+        67: "/static/rain.svg",
+        // Snow fall: Slight, moderate, heavy intensity
         71: "/static/snow.svg",
-        95: "/static/thunderstorm.svg"
+        73: "/static/snow.svg",
+        75: "/static/snow.svg",
+        // Snow grains
+        77: "/static/snow.svg",
+        // Rain showers: Slight, moderate, violent
+        80: "/static/rain.svg",
+        81: "/static/rain.svg",
+        82: "/static/rain.svg",
+        // Snow showers: Slight, moderate, heavy
+        85: "/static/snow.svg",
+        86: "/static/snow.svg",
+        // Thunderstorm: Slight, moderate, with hail
+        95: "/static/thunderstorm.svg",
+        96: "/static/thunderstorm.svg",
+        99: "/static/thunderstorm.svg"
     };
 
-    const iconPath = weatherMap[weatherCode] || "/static/unknown.svg";
+    const iconPath = weatherMap[weatherCode];
 
     // Update DOM
     document.getElementById('weather').innerText = `${Math.round(temperature)}°C`;
-    document.getElementById('weather-icon').innerHTML = `<img src="${iconPath}" width="60" height="60" alt="Weather Icon">`;
+    
+    // If no mapping found, use a fallback emoji instead of missing SVG
+    if (!iconPath) {
+      console.warn(`Unknown weather code: ${weatherCode}, using fallback emoji`);
+      document.getElementById('weather-icon').innerHTML = "🌤️";
+    } else {
+      document.getElementById('weather-icon').innerHTML = `<img src="${iconPath}" width="60" height="60" alt="Weather Icon">`;
+    }
     document.getElementById('humidity').innerText = ""; // Open-Meteo current_weather does not provide humidity
 
   } catch (error) {
@@ -282,14 +561,213 @@ async function fetchWeather() {
   }
 }
 
-// Clock + Date updater
+// Auto-scroll table function
+function autoScrollTable() {
+  // Get table wrapper if not available
+  if (!tableWrapper) {
+    tableWrapper = document.querySelector('.table-wrapper');
+  }
+  
+  // Stop if no wrapper or scrolling is disabled
+  if (!tableWrapper) {
+    return;
+  }
+  
+  if (!isScrolling) {
+    return;
+  }
+  
+  // If paused (at top/bottom), don't scroll
+  if (scrollPaused) {
+    return;
+  }
+  
+  const currentScroll = tableWrapper.scrollTop;
+  const maxScroll = tableWrapper.scrollHeight - tableWrapper.clientHeight;
+  
+  // If table content doesn't need scrolling, don't scroll
+  if (maxScroll <= 0) {
+    return;
+  }
+  
+  // Check if we've reached top or bottom
+  // Use a small threshold to detect when we're at the edges
+  const threshold = 2;
+  const isAtTop = currentScroll <= threshold;
+  const isAtBottom = currentScroll >= (maxScroll - threshold);
+  
+  if (isAtTop || isAtBottom) {
+    if (!scrollPaused) {
+      scrollPaused = true;
+      const wasAtBottom = isAtBottom; // Store which edge we hit
+      console.log('Auto-scroll: Paused at', isAtTop ? 'top' : 'bottom', 'scrollTop =', Math.round(currentScroll), 'maxScroll =', Math.round(maxScroll), 'direction before:', scrollDirection > 0 ? 'down' : 'up');
+      
+      // Ensure we're exactly at the edge
+      if (isAtTop) {
+        tableWrapper.scrollTop = 0;
+      } else if (isAtBottom) {
+        tableWrapper.scrollTop = maxScroll;
+      }
+      
+      // Stop current animation
+      if (scrollAnimationFrame) {
+        cancelAnimationFrame(scrollAnimationFrame);
+        scrollAnimationFrame = null;
+      }
+      
+      setTimeout(() => {
+        // Reverse direction
+        scrollDirection *= -1;
+        scrollPaused = false;
+        console.log('Auto-scroll: Resuming after pause, new direction =', scrollDirection > 0 ? 'down' : 'up', 'isScrolling:', isScrolling);
+        
+        // Force immediate scroll to get out of the edge detection
+        // Move slightly away from the edge based on new direction
+        const currentScrollAfterPause = tableWrapper.scrollTop;
+        const maxScrollAfterPause = tableWrapper.scrollHeight - tableWrapper.clientHeight;
+        
+        if (wasAtBottom && scrollDirection < 0) {
+          // Was at bottom, now going up - move up from bottom
+          tableWrapper.scrollTop = Math.max(0, maxScrollAfterPause - 10);
+        } else if (!wasAtBottom && scrollDirection > 0) {
+          // Was at top, now going down - move down from top
+          tableWrapper.scrollTop = Math.min(maxScrollAfterPause, 10);
+        }
+        
+        console.log('Auto-scroll: Position after direction change:', Math.round(tableWrapper.scrollTop), '/', Math.round(maxScrollAfterPause));
+        
+        // Continue scrolling in new direction
+        if (isScrolling) {
+          scrollAnimationFrame = requestAnimationFrame(autoScrollTable);
+        }
+      }, scrollPause);
+    }
+    return;
+  }
+  
+  // Continuous scroll
+  const oldScrollTop = tableWrapper.scrollTop;
+  const newScrollTop = oldScrollTop + (scrollSpeed * scrollDirection);
+  tableWrapper.scrollTop = newScrollTop;
+  
+  // Verify scroll actually changed (debug)
+  if (Math.abs(tableWrapper.scrollTop - oldScrollTop) < 0.1 && scrollSpeed > 0) {
+    console.warn('Auto-scroll: Scroll position did not change! scrollTop:', tableWrapper.scrollTop, 'oldScrollTop:', oldScrollTop);
+  }
+  
+  // Schedule next frame - must always be called to continue animation
+  scrollAnimationFrame = requestAnimationFrame(autoScrollTable);
+}
+
+// Stop auto-scroll
+function stopAutoScroll() {
+  isScrolling = false;
+  if (scrollAnimationFrame) {
+    cancelAnimationFrame(scrollAnimationFrame);
+    scrollAnimationFrame = null;
+  }
+}
+
+// Start auto-scroll
+function startAutoScroll() {
+  // Get table wrapper if not available
+  if (!tableWrapper) {
+    tableWrapper = document.querySelector('.table-wrapper');
+  }
+  
+  if (!tableWrapper) {
+    console.log('Auto-scroll: tableWrapper not found');
+    return;
+  }
+  
+  // Stop any existing scroll animation first
+  if (scrollAnimationFrame) {
+    cancelAnimationFrame(scrollAnimationFrame);
+    scrollAnimationFrame = null;
+  }
+  
+  // Check if scrolling is needed
+  const maxScroll = tableWrapper.scrollHeight - tableWrapper.clientHeight;
+  console.log('Auto-scroll: Checking - scrollHeight =', tableWrapper.scrollHeight, 'clientHeight =', tableWrapper.clientHeight, 'maxScroll =', maxScroll);
+  
+  if (maxScroll <= 0) {
+    // Table doesn't need scrolling
+    console.log('Auto-scroll: Table content fits, no scrolling needed');
+    isScrolling = false;
+    return;
+  }
+  
+  // Always reset and start scrolling
+  console.log('Auto-scroll: Starting scroll, current scrollTop =', tableWrapper.scrollTop, 'maxScroll =', maxScroll, 'scrollSpeed =', scrollSpeed);
+  isScrolling = true;
+  scrollPaused = false; // Reset paused state when starting
+  scrollDirection = 1; // Always start scrolling down
+  
+  // Start the animation loop immediately
+  if (!scrollAnimationFrame) {
+    scrollAnimationFrame = requestAnimationFrame(autoScrollTable);
+    console.log('Auto-scroll: Animation frame requested, isScrolling =', isScrolling);
+  }
+}
+
+// Clock + Date updater (Portuguese/European format)
 function updateClock() {
   const now = new Date();
-  const time = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  const date = now.toLocaleDateString();
+  const time = formatTimePT(now);
+  const date = formatDatePT(now);
   document.getElementById('time').innerText = time;
   document.getElementById('date').innerText = date;
 }
+
+// Setup table auto-scroll pause on hover
+document.addEventListener('DOMContentLoaded', () => {
+  tableWrapper = document.querySelector('.table-wrapper');
+  if (tableWrapper) {
+    // Pause scroll on hover
+    tableWrapper.addEventListener('mouseenter', () => {
+      stopAutoScroll();
+    });
+    
+    // Resume scroll when mouse leaves
+    tableWrapper.addEventListener('mouseleave', () => {
+      startAutoScroll();
+    });
+    
+    // Also pause when user manually scrolls
+    let userScrolling = false;
+    let scrollTimeout = null;
+    tableWrapper.addEventListener('wheel', (e) => {
+      userScrolling = true;
+      stopAutoScroll();
+      
+      // Resume after user stops scrolling for 3 seconds
+      clearTimeout(scrollTimeout);
+      scrollTimeout = setTimeout(() => {
+        userScrolling = false;
+        const maxScroll = tableWrapper.scrollHeight - tableWrapper.clientHeight;
+        if (maxScroll > 0) {
+          startAutoScroll();
+        }
+      }, 3000);
+    }, { passive: true });
+    
+    // Resume after touch scroll on mobile
+    tableWrapper.addEventListener('touchmove', () => {
+      userScrolling = true;
+      stopAutoScroll();
+    }, { passive: true });
+    
+    tableWrapper.addEventListener('touchend', () => {
+      scrollTimeout = setTimeout(() => {
+        userScrolling = false;
+        const maxScroll = tableWrapper.scrollHeight - tableWrapper.clientHeight;
+        if (maxScroll > 0) {
+          startAutoScroll();
+        }
+      }, 3000);
+    });
+  }
+});
 
 fetchWeather();
 setInterval(fetchWeather, 10 * 60 * 1000); // refresh every 10 min

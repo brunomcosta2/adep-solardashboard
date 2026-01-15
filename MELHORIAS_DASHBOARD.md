@@ -3,11 +3,11 @@
 ## Checklist de Implementação
 
 ### 1. Indicador de Atualização + Countdown
-- [ ] Adicionar elemento HTML para mostrar "A atualizar..." durante fetch
-- [ ] Adicionar countdown timer mostrando tempo até próxima atualização
-- [ ] Atualizar countdown a cada segundo
-- [ ] Resetar countdown após atualização bem-sucedida
-- [ ] Estilizar indicador (spinner pequeno + texto)
+- [x] Adicionar elemento HTML para mostrar "A atualizar..." durante fetch
+- [x] Adicionar countdown timer mostrando tempo até próxima atualização
+- [x] Atualizar countdown a cada segundo
+- [x] Resetar countdown após atualização bem-sucedida
+- [x] Estilizar indicador (spinner pequeno + texto)
 
 ### 2. Scroll Automático na Tabela
 - [ ] Implementar scroll automático vertical na tabela
@@ -50,6 +50,9 @@
 - [ ] Mostrar badge/indicador "Cache" ou "Dados frescos"
 - [ ] Mostrar idade do cache (ex: "Atualizado há 2 min")
 - [ ] Estilizar diferentemente (cache = amarelo, fresh = verde)
+
+### 11. Não indicar instalação "Sem Produção" à noite
+- [ ] Validar pôr do sol + alerta sem produção e ignorar o alerta
 
 ---
 
@@ -415,7 +418,7 @@ autoScrollTable();
 
 ## Status
 
-- [ ] Item 1 - Indicador de Atualização + Countdown
+- [x] Item 1 - Indicador de Atualização + Countdown
 - [ ] Item 2 - Scroll Automático na Tabela
 - [ ] Item 4 - Tratamento de Erros na UI
 - [ ] Item 5 - Indicador de Status de Conexão

@@ -131,6 +131,9 @@ _data_cache = {
 }
 CACHE_DURATION = 5 * 60  # 5 minutes in seconds
 
+# Disconnected plant threshold: change to red if disconnected for more than X hours
+DISCONNECTED_RED_THRESHOLD_HOURS = 8  # Hours
+
 # CAPTCHA Configuration
 # Path to the captcha model file (relative to app.py location)
 CAPTCHA_MODEL_PATH = os.path.join("models", "captcha_huawei.onnx")
@@ -235,7 +238,7 @@ list_of_plants = [
     ("Escola Básica Miosótis", "0"),
     ("Escola Básica Augusto Lessa", "0"),
     ("Escola Básica Bom Pastor", "0"),
-    ("Escola Básica Costa Cabral", "1"),
+    ("Escola Básica Costa Cabral", "0"),
     ("Escola Básica Bom Sucesso", "0"),
     ("Escola Básica São Tomé", "0"),
     ("Escola Básica do Falcão", "0"),    
@@ -260,9 +263,9 @@ list_of_plants = [
     ("Bloco A -N142", "0"),
     ("Bloco A -N138", "0"),
     ("Bloco A - N134", "0"),
-    ("Escola EB1 Agra do Amial", "1"),
+    ("Escola EB1 Agra do Amial", "0"),
     ("TRP", "0"),
-    ("TRP Museu", "1"),
+    ("TRP Museu", "0"),
     ("TRP Elevadores", "0"),
     ("MAP UPAC 2", "0"),
     ("MAP UPAC 1", "0"),    
@@ -502,12 +505,101 @@ def get_plant_stats(
     # return the plant data
     return plant_data["data"]
 
+def get_inverter_ids(self, plant_id: str) -> list:
+    """Get inverter device IDs for a specific plant
+    :param plant_id: The plant's id
+    :type plant_id: str
+    :return: List of inverter device IDs (deviceDn)
+    :rtype: list
+    """
+    inverter_ids = []
+    try:
+        # Method 1: Try using plant flow to get device IDs
+        # Check if get_plant_flow method exists
+        if not hasattr(self, 'get_plant_flow'):
+            _LOGGER.warning(f"get_plant_flow method not found on client, trying alternative method")
+            raise AttributeError("get_plant_flow method not available")
+        
+        _LOGGER.debug(f"Calling get_plant_flow for plant {plant_id}")
+        plant_flow = self.get_plant_flow(plant_id)
+        _LOGGER.debug(f"get_plant_flow returned: {type(plant_flow)}")
+        
+        if not plant_flow or not isinstance(plant_flow, dict):
+            _LOGGER.warning(f"get_plant_flow returned invalid data for plant {plant_id}")
+            raise ValueError("Invalid plant flow data")
+        
+        nodes = plant_flow.get('data', {}).get('flow', {}).get('nodes', [])
+        _LOGGER.debug(f"Found {len(nodes)} nodes in plant flow for {plant_id}")
+        
+        for node in nodes:
+            # Look for inverter nodes - check name, type, and other fields
+            node_name = node.get('name', '').lower()
+            node_type = node.get('type', '').lower()
+            node_id = node.get('id', '').lower()
+            
+            # Check if this is an inverter node
+            # Check each text field against each keyword
+            if any(keyword in text for text in [node_name, node_type, node_id] 
+                   for keyword in ['inverter', 'inv']):
+                # Get device IDs from this node
+                dev_ids = node.get('devIds', [])
+                if dev_ids:
+                    # Filter out None values before extending
+                    valid_dev_ids = [dev_id for dev_id in dev_ids if dev_id]
+                    if valid_dev_ids:
+                        inverter_ids.extend(valid_dev_ids)
+                        _LOGGER.debug(f"Found inverter node: {node_name or node_type or node_id}, devIds: {valid_dev_ids}")
+                    else:
+                        _LOGGER.warning(f"Inverter node found but all devIds are None or empty: {node_name or node_type or node_id}")
+        
+        # If no inverters found via plant flow, try alternative method
+        if not inverter_ids:
+            _LOGGER.info(f"No inverters found via plant flow for {plant_id}, trying alternative method")
+            # Method 2: Try using get_device_ids and filter (less precise but may work)
+            try:
+                if not hasattr(self, 'get_device_ids'):
+                    _LOGGER.warning(f"get_device_ids method not found on client")
+                    raise AttributeError("get_device_ids method not available")
+                
+                all_devices = self.get_device_ids()
+                _LOGGER.debug(f"get_device_ids returned {len(all_devices)} devices")
+                # Filter for inverters - note: this gets all inverters in account, not just this plant
+                # But it's a fallback if plant_flow doesn't work
+                for device in all_devices:
+                    if device.get('type', '').lower() == 'inverter':
+                        device_dn = device.get('deviceDn')
+                        # Only add if deviceDn exists and is not None
+                        if device_dn:
+                            inverter_ids.append(device_dn)
+                            _LOGGER.debug(f"Found inverter device: {device}")
+                        else:
+                            _LOGGER.warning(f"Inverter device found but deviceDn is missing or None: {device}")
+            except Exception as e2:
+                _LOGGER.warning(f"Alternative method also failed for plant {plant_id}: {e2}", exc_info=True)
+        
+        if inverter_ids:
+            _LOGGER.info(f"Found {len(inverter_ids)} inverter(s) for plant {plant_id}: {inverter_ids}")
+        else:
+            _LOGGER.info(f"No inverters found for plant {plant_id}")
+        
+        return inverter_ids
+    except AttributeError as e:
+        _LOGGER.error(f"Method not available when getting inverter IDs for plant {plant_id}: {e}", exc_info=True)
+        return []
+    except Exception as e:
+        _LOGGER.warning(f"Failed to get inverter IDs for plant {plant_id}: {e}", exc_info=True)
+        return []
+
 # Monkey-patch additional methods to FusionSolarClient
 FusionSolarClient.get_current_plant_data = get_current_plant_data
 FusionSolarClient.get_plant_stats_yearly = get_plant_stats_yearly
 FusionSolarClient.get_plant_stats_monthly = get_plant_stats_monthly
 FusionSolarClient.get_power_status = get_power_status
 FusionSolarClient.get_plant_stats = get_plant_stats
+FusionSolarClient.get_inverter_ids = get_inverter_ids
+
+# Note: get_alarm_data() already exists in fusion_solar_py library, no monkey-patch needed
+# The method is available at: FusionSolarClient.get_alarm_data(device_dn)
 
 error_messages = {
             1: "Instalação Desligada",
@@ -545,29 +637,73 @@ def get_or_create_client(account):
             try:
                 _LOGGER.info(f"[SESSION] Creating NEW session for account: {USER} (subdomain: {SUBDOMAIN})")
                 print(f"🔑 Creating session for {USER}...")
+                
+                # Log account details (without password for security)
+                _LOGGER.debug(f"[SESSION] Account details - USER: '{USER}', SUBDOMAIN: '{SUBDOMAIN}', PASSWORD length: {len(PASSWORD)}")
+                _LOGGER.debug(f"[SESSION] USER type: {type(USER)}, SUBDOMAIN type: {type(SUBDOMAIN)}, PASSWORD type: {type(PASSWORD)}")
+                _LOGGER.debug(f"[SESSION] USER repr: {repr(USER)}, SUBDOMAIN repr: {repr(SUBDOMAIN)}")
+                
                 # Initialize client with captcha support if model path is provided
                 client_kwargs = {"huawei_subdomain": SUBDOMAIN}
-                if CAPTCHA_MODEL_PATH and os.path.exists(CAPTCHA_MODEL_PATH):
-                    client_kwargs["captcha_model_path"] = CAPTCHA_MODEL_PATH
-                    _LOGGER.info(f"CAPTCHA support enabled - using model: {CAPTCHA_MODEL_PATH}")
-                    print(f"Using CAPTCHA model: {CAPTCHA_MODEL_PATH}")
-                elif CAPTCHA_MODEL_PATH:
-                    _LOGGER.warning(f"CAPTCHA model path specified but file not found: {CAPTCHA_MODEL_PATH}")
-                    print(f"⚠️  Warning: CAPTCHA model not found at {CAPTCHA_MODEL_PATH}")
+                _LOGGER.debug(f"[SESSION] Initial client_kwargs: {client_kwargs}")
                 
+                if CAPTCHA_MODEL_PATH:
+                    _LOGGER.debug(f"[SESSION] CAPTCHA_MODEL_PATH: '{CAPTCHA_MODEL_PATH}'")
+                    _LOGGER.debug(f"[SESSION] CAPTCHA_MODEL_PATH exists: {os.path.exists(CAPTCHA_MODEL_PATH) if CAPTCHA_MODEL_PATH else False}")
+                    _LOGGER.debug(f"[SESSION] CAPTCHA_MODEL_PATH absolute: {os.path.abspath(CAPTCHA_MODEL_PATH) if CAPTCHA_MODEL_PATH else 'N/A'}")
+                    
+                    if os.path.exists(CAPTCHA_MODEL_PATH):
+                        try:
+                            # Try to get absolute path and verify it's valid
+                            abs_path = os.path.abspath(CAPTCHA_MODEL_PATH)
+                            _LOGGER.debug(f"[SESSION] CAPTCHA model absolute path: '{abs_path}'")
+                            client_kwargs["captcha_model_path"] = abs_path
+                            _LOGGER.info(f"[SESSION] CAPTCHA support enabled - using model: {abs_path}")
+                            print(f"Using CAPTCHA model: {abs_path}")
+                        except Exception as path_error:
+                            _LOGGER.error(f"[SESSION] Error processing CAPTCHA model path '{CAPTCHA_MODEL_PATH}': {path_error}", exc_info=True)
+                            print(f"⚠️  Error with CAPTCHA model path: {path_error}")
+                    else:
+                        _LOGGER.warning(f"[SESSION] CAPTCHA model path specified but file not found: {CAPTCHA_MODEL_PATH}")
+                        print(f"⚠️  Warning: CAPTCHA model not found at {CAPTCHA_MODEL_PATH}")
+                else:
+                    _LOGGER.debug(f"[SESSION] No CAPTCHA_MODEL_PATH configured")
+                
+                _LOGGER.debug(f"[SESSION] Final client_kwargs: {client_kwargs}")
                 _LOGGER.info(f"[SESSION] Attempting login for account: {USER}...")
                 login_start_time = time.time()
                 
                 # Track if CAPTCHA was encountered during login
                 # The fusion_solar_py library will log "solving captcha and retrying login" if CAPTCHA is needed
                 try:
+                    _LOGGER.debug(f"[SESSION] Calling FusionSolarClient with USER='{USER}', PASSWORD length={len(PASSWORD)}, kwargs={client_kwargs}")
+                    _LOGGER.debug(f"[SESSION] About to create FusionSolarClient instance...")
                     client = FusionSolarClient(USER, PASSWORD, **client_kwargs)
+                    _LOGGER.debug(f"[SESSION] FusionSolarClient instance created successfully")
+                except OSError as os_error:
+                    # OSError with errno 22 is "Invalid argument"
+                    error_code = getattr(os_error, 'errno', None)
+                    error_msg = str(os_error)
+                    _LOGGER.error(f"[SESSION] OSError during login for {USER}: errno={error_code}, message='{error_msg}'", exc_info=True)
+                    _LOGGER.error(f"[SESSION] OSError details - USER: '{USER}', SUBDOMAIN: '{SUBDOMAIN}', PASSWORD length: {len(PASSWORD)}")
+                    _LOGGER.error(f"[SESSION] OSError details - client_kwargs: {client_kwargs}")
+                    if CAPTCHA_MODEL_PATH:
+                        _LOGGER.error(f"[SESSION] OSError details - CAPTCHA_MODEL_PATH: '{CAPTCHA_MODEL_PATH}', exists: {os.path.exists(CAPTCHA_MODEL_PATH)}")
+                    print(f"❌ OSError during login for {USER}: errno={error_code}, {error_msg}")
+                    raise
                 except Exception as login_exc:
                     # Check if it's a CAPTCHA-related exception
-                    error_msg = str(login_exc).lower()
-                    if 'captcha' in error_msg:
+                    error_msg = str(login_exc)
+                    error_type = type(login_exc).__name__
+                    _LOGGER.error(f"[SESSION] Exception during login for {USER}: {error_type} - {error_msg}", exc_info=True)
+                    _LOGGER.error(f"[SESSION] Exception details - USER: '{USER}', SUBDOMAIN: '{SUBDOMAIN}', PASSWORD length: {len(PASSWORD)}")
+                    _LOGGER.error(f"[SESSION] Exception details - client_kwargs: {client_kwargs}")
+                    
+                    if 'captcha' in error_msg.lower():
                         _LOGGER.warning(f"[CAPTCHA] ⚠️ CAPTCHA encountered during login for {USER}: {login_exc}")
                         print(f"🔐 [CAPTCHA] Encountered during login for {USER}")
+                    else:
+                        print(f"❌ Exception during login for {USER}: {error_type}: {error_msg}")
                     raise
                 
                 login_duration = time.time() - login_start_time
@@ -587,10 +723,36 @@ def get_or_create_client(account):
                 _LOGGER.error(f"[SESSION] FusionSolar API error during login for {USER}: {error_msg}")
                 print(f"❌ FusionSolar API error for {USER}: {error_msg}")
                 raise
+            except OSError as os_error:
+                # OSError with errno 22 is "Invalid argument" - often related to file paths or encoding
+                error_code = getattr(os_error, 'errno', None)
+                error_msg = str(os_error)
+                filename = getattr(os_error, 'filename', None)
+                _LOGGER.error(f"[SESSION] OSError during login for {USER}: errno={error_code}, message='{error_msg}', filename={filename}", exc_info=True)
+                _LOGGER.error(f"[SESSION] OSError context - USER: '{USER}', SUBDOMAIN: '{SUBDOMAIN}', PASSWORD length: {len(PASSWORD)}")
+                _LOGGER.error(f"[SESSION] OSError context - client_kwargs: {client_kwargs}")
+                if CAPTCHA_MODEL_PATH:
+                    _LOGGER.error(f"[SESSION] OSError context - CAPTCHA_MODEL_PATH: '{CAPTCHA_MODEL_PATH}'")
+                    _LOGGER.error(f"[SESSION] OSError context - CAPTCHA_MODEL_PATH exists: {os.path.exists(CAPTCHA_MODEL_PATH)}")
+                    try:
+                        abs_path = os.path.abspath(CAPTCHA_MODEL_PATH)
+                        _LOGGER.error(f"[SESSION] OSError context - CAPTCHA_MODEL_PATH absolute: '{abs_path}'")
+                    except Exception as path_err:
+                        _LOGGER.error(f"[SESSION] OSError context - Could not get absolute path: {path_err}")
+                print(f"❌ OSError during login for {USER}: errno={error_code}, {error_msg}")
+                if filename:
+                    print(f"   Related file: {filename}")
+                raise
             except Exception as e:
                 error_msg = str(e)
                 error_type = type(e).__name__
+                error_args = getattr(e, 'args', None)
                 _LOGGER.error(f"[SESSION] Failed to create session for {USER} (Error type: {error_type}): {error_msg}", exc_info=True)
+                _LOGGER.error(f"[SESSION] Exception details - USER: '{USER}', SUBDOMAIN: '{SUBDOMAIN}', PASSWORD length: {len(PASSWORD)}")
+                _LOGGER.error(f"[SESSION] Exception details - client_kwargs: {client_kwargs}")
+                _LOGGER.error(f"[SESSION] Exception args: {error_args}")
+                if CAPTCHA_MODEL_PATH:
+                    _LOGGER.error(f"[SESSION] Exception context - CAPTCHA_MODEL_PATH: '{CAPTCHA_MODEL_PATH}', exists: {os.path.exists(CAPTCHA_MODEL_PATH)}")
                 print(f"❌ Erro ao criar sessão para {USER}: {error_type}: {error_msg}")
                 raise
         else:
@@ -739,11 +901,23 @@ def process_account(account):
                 result["alerts"].append(f"🔴 {plant_name} - Erro ao buscar dados: {error_display}")
                 continue
 
-            production_power = float(plant_data['productPower']['value'] or 0)
-            consumption_power = float(plant_data['usePower']['value'] or 0)
-            grid_power = float(plant_data['meterActivePower']['value'] or 0)
+            # Extract values and timestamps
+            production_data = plant_data.get('productPower', {})
+            production_power = float(production_data.get('value') or 0) if isinstance(production_data, dict) else float(production_data or 0)
+            production_time = production_data.get('time') if isinstance(production_data, dict) else None
             
-            _LOGGER.debug(f"Plant {plant_name} data - Production: {production_power} kW, Consumption: {consumption_power} kW, Grid: {grid_power} kW")
+            consumption_data = plant_data.get('usePower', {})
+            consumption_power = float(consumption_data.get('value') or 0) if isinstance(consumption_data, dict) else float(consumption_data or 0)
+            consumption_time = consumption_data.get('time') if isinstance(consumption_data, dict) else None
+            
+            grid_data = plant_data.get('meterActivePower', {})
+            grid_power = float(grid_data.get('value') or 0) if isinstance(grid_data, dict) else float(grid_data or 0)
+            grid_time = grid_data.get('time') if isinstance(grid_data, dict) else None
+            
+            # Get the most recent timestamp (or any available timestamp)
+            last_data_time = production_time or consumption_time or grid_time
+            
+            _LOGGER.debug(f"Plant {plant_name} data - Production: {production_power} kW ({production_time}), Consumption: {consumption_power} kW ({consumption_time}), Grid: {grid_power} kW ({grid_time})")
 
             # totals
             result["production"] += production_power
@@ -758,6 +932,22 @@ def process_account(account):
             elif plant['plantStatus'] == 'disconnected':
                 status_icon = "🟡"
                 error_state = 1
+                
+                # Check if disconnected for more than threshold hours
+                if last_data_time:
+                    try:
+                        # Parse timestamp from "2026-01-15 14:30" format
+                        last_data_datetime = datetime.strptime(last_data_time, "%Y-%m-%d %H:%M")
+                        current_datetime = datetime.now()
+                        hours_disconnected = (current_datetime - last_data_datetime).total_seconds() / 3600
+                        
+                        if hours_disconnected >= DISCONNECTED_RED_THRESHOLD_HOURS:
+                            status_icon = "🔴"
+                            _LOGGER.warning(f"Plant {plant_name} has been disconnected for {hours_disconnected:.1f} hours (threshold: {DISCONNECTED_RED_THRESHOLD_HOURS}h)")
+                    except (ValueError, TypeError) as e:
+                        # If timestamp parsing fails, keep yellow status
+                        _LOGGER.debug(f"Could not parse timestamp for {plant_name}: {last_data_time}, error: {e}")
+                
             elif plant['plantStatus'] == 'connected' and production_power != 0 and consumption_power == 0:
                 status_icon = "🟡"
                 error_state = 2
@@ -771,11 +961,159 @@ def process_account(account):
             plant_working_map = {name: code for name, code in list_of_plants}
             if error_state != 0:
                 error_message = error_messages.get(error_state, "Erro desconhecido")
-                if plant_working_map.get(plant_name) == "1":
+                # Only override with ⏳ if not already red (🔴)
+                if plant_working_map.get(plant_name) == "1" and status_icon != "🔴":
                     status_icon = "⏳"
-                result["alerts"].append(f"{status_icon} {plant_name} - {error_message}")
+                
+                # Build alert message
+                alert_msg = f"{status_icon} {plant_name} - {error_message}"
+                
+                # Add timestamp for critical alerts (🔴)
+                if status_icon == "🔴" and last_data_time:
+                    try:
+                        # Format timestamp: "2026-01-15 14:30" -> "15/01/2026 14:30"
+                        last_data_datetime = datetime.strptime(last_data_time, "%Y-%m-%d %H:%M")
+                        formatted_time = last_data_datetime.strftime("%d/%m/%Y %H:%M")
+                        alert_msg += f" (última comunicação: {formatted_time})"
+                    except (ValueError, TypeError):
+                        # If parsing fails, use original format
+                        alert_msg += f" (última comunicação: {last_data_time})"
+                
+                result["alerts"].append(alert_msg)
 
             surplus_power = max(production_power - consumption_power, 0)
+
+            # Check for active alarms for all installations
+            active_alarms = []
+            try:
+                _LOGGER.info(f"🔍 Checking for active alarms in {plant_name} (plant_id: {plant_id})...")
+                # Verify client has get_inverter_ids (monkey-patched method)
+                # Note: get_alarm_data() exists in fusion_solar_py library, so it's always available
+                if not hasattr(client, 'get_inverter_ids'):
+                    _LOGGER.error(f"get_inverter_ids method not found on client for {plant_name}")
+                else:
+                    # Get inverter IDs for this plant
+                    _LOGGER.info(f"Calling get_inverter_ids for {plant_name}...")
+                    inverter_ids = client.get_inverter_ids(plant_id)
+                    _LOGGER.info(f"get_inverter_ids returned {len(inverter_ids)} inverter(s) for {plant_name}: {inverter_ids}")
+                    
+                    if inverter_ids:
+                        # Check alarms for each inverter
+                        # get_alarm_data() is part of fusion_solar_py library, so it's always available
+                        for inverter_id in inverter_ids:
+                            # Skip if inverter_id is None or empty
+                            if not inverter_id:
+                                _LOGGER.warning(f"Skipping alarm check for {plant_name}: inverter_id is None or empty")
+                                continue
+                            
+                            try:
+                                _LOGGER.info(f"Calling get_alarm_data for inverter {inverter_id} in {plant_name}...")
+                                alarm_data = client.get_alarm_data(device_dn=inverter_id)
+                                _LOGGER.info(f"get_alarm_data returned for {plant_name}: {type(alarm_data)}, keys: {list(alarm_data.keys()) if isinstance(alarm_data, dict) else 'N/A'}")
+                                
+                                # Parse alarm response - structure may vary
+                                alarms = []
+                                
+                                # Try different possible response structures
+                                if isinstance(alarm_data, dict):
+                                    if alarm_data.get("success") and "data" in alarm_data:
+                                        data = alarm_data["data"]
+                                        # Could be a list directly or nested
+                                        if isinstance(data, list):
+                                            alarms = data
+                                        elif isinstance(data, dict):
+                                            alarms = data.get("list", []) or data.get("alarms", []) or data.get("data", [])
+                                    elif "list" in alarm_data:
+                                        alarms = alarm_data["list"]
+                                    elif "alarms" in alarm_data:
+                                        alarms = alarm_data["alarms"]
+                                
+                                _LOGGER.info(f"Parsed {len(alarms)} alarm(s) from response for {plant_name}")
+                                
+                                if alarms:
+                                    for alarm in alarms:
+                                        if not isinstance(alarm, dict):
+                                            continue
+                                            
+                                        alarm_name = alarm.get("alarmName") or alarm.get("name") or alarm.get("alarm_name") or "Alarme desconhecido"
+                                        alarm_level = alarm.get("alarmLevel") or alarm.get("level") or alarm.get("alarm_level") or ""
+                                        alarm_time = alarm.get("alarmTime") or alarm.get("time") or alarm.get("alarm_time") or alarm.get("occurTime") or ""
+                                        
+                                        # Format alarm time if available
+                                        alarm_time_str = "N/A"
+                                        if alarm_time:
+                                            try:
+                                                # Try different time formats
+                                                if isinstance(alarm_time, (int, float)):
+                                                    # Timestamp in milliseconds
+                                                    alarm_dt = datetime.fromtimestamp(alarm_time / 1000)
+                                                    alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                                elif isinstance(alarm_time, str):
+                                                    # Try parsing as timestamp or date string
+                                                    try:
+                                                        if alarm_time.isdigit():
+                                                            alarm_dt = datetime.fromtimestamp(int(alarm_time) / 1000)
+                                                            alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                                        else:
+                                                            # Try parsing as date string
+                                                            alarm_dt = datetime.strptime(alarm_time, "%Y-%m-%d %H:%M:%S")
+                                                            alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                                    except:
+                                                        alarm_time_str = alarm_time
+                                            except Exception as time_error:
+                                                _LOGGER.debug(f"Could not parse alarm time: {alarm_time}, error: {time_error}")
+                                                alarm_time_str = str(alarm_time)
+                                        
+                                        # Map alarm level to emoji
+                                        level_emoji = {
+                                            "1": "🔴",  # Critical
+                                            "2": "🟠",  # Major
+                                            "3": "🟡",  # Minor
+                                            "4": "⚪",  # Warning
+                                            "critical": "🔴",
+                                            "major": "🟠",
+                                            "minor": "🟡",
+                                            "warning": "⚪"
+                                        }.get(str(alarm_level).lower(), "⚠️")
+                                        
+                                        active_alarms.append({
+                                            "device": "Inversor",
+                                            "name": alarm_name,
+                                            "level": alarm_level,
+                                            "time": alarm_time_str,
+                                            "emoji": level_emoji
+                                        })
+                                        _LOGGER.warning(f"🚨 Active alarm in {plant_name} - Inversor: {alarm_name} (Level {alarm_level}) at {alarm_time_str}")
+                                        print(f"    🚨 {plant_name}: {alarm_name} (Nível {alarm_level}) - {alarm_time_str}")
+                            except FusionSolarException as alarm_error:
+                                error_msg = str(alarm_error)
+                                _LOGGER.warning(f"FusionSolar API error getting alarms for inverter {inverter_id} in {plant_name}: {error_msg}")
+                                continue
+                            except Exception as alarm_error:
+                                error_msg = str(alarm_error)
+                                error_type = type(alarm_error).__name__
+                                _LOGGER.warning(f"Failed to get alarms for inverter {inverter_id} in {plant_name}: {error_type} - {error_msg}", exc_info=True)
+                                continue
+                    
+                    if active_alarms:
+                        _LOGGER.info(f"Found {len(active_alarms)} active alarm(s) in {plant_name}")
+                        print(f"    ⚠️  {plant_name}: {len(active_alarms)} alarme(s) ativo(s)")
+                        # Add alarms to alerts
+                        for alarm in active_alarms:
+                            result["alerts"].append(
+                                f"{alarm['emoji']} {plant_name} - {alarm['name']} (Inversor, {alarm['time']})"
+                            )
+                    else:
+                        _LOGGER.debug(f"No active alarms found in {plant_name}")
+            except AttributeError as e:
+                error_msg = str(e)
+                _LOGGER.error(f"Attribute error when checking alarms for {plant_name}: {error_msg}", exc_info=True)
+                print(f"    ❌ Erro ao verificar alarmes em {plant_name}: método não disponível")
+            except Exception as e:
+                error_msg = str(e)
+                error_type = type(e).__name__
+                _LOGGER.warning(f"Error checking alarms for {plant_name}: {error_type} - {error_msg}", exc_info=True)
+                # Don't fail the whole process if alarm check fails - just log and continue
 
             result["statuses"].append({
                 "name": plant['name'],
@@ -784,7 +1122,10 @@ def process_account(account):
                 "consumption": consumption_power,
                 "grid": grid_power,
                 "surplus": surplus_power,
-                "status_icon": status_icon
+                "status_icon": status_icon,
+                "last_data_time": last_data_time,  # Timestamp do último dado válido
+                "active_alarms": active_alarms,  # Include alarms for this plant
+                "alarm_count": len(active_alarms)  # Count of active alarms
             })
 
             # chart data
@@ -894,7 +1235,24 @@ def _fetch_live_data():
         
         alert_message = "✅ Todas as instalações estão a funcionar normalmente."
         if zero_production_plants:
-            zero_production_plants.sort(key=lambda x: x.startswith("⏳"))
+            # Sort alerts by priority: 🔴 (critical) first, then 🟠 (major), then ⏳, then 🟡 (minor), then ⚪ (warning), then ⚠️
+            def alert_priority(alert):
+                if alert.startswith("🔴"):
+                    return 0  # Highest priority - Critical
+                elif alert.startswith("🟠"):
+                    return 1  # Major alarms
+                elif alert.startswith("⏳"):
+                    return 2  # In maintenance
+                elif alert.startswith("🟡"):
+                    return 3  # Minor alarms
+                elif alert.startswith("⚪"):
+                    return 4  # Warning alarms
+                elif alert.startswith("⚠️"):
+                    return 5
+                else:
+                    return 6  # Lowest priority
+            
+            zero_production_plants.sort(key=alert_priority)
             alert_message = "As seguintes instalações estão com problemas:\n" + "\n".join([f"- {p}" for p in zero_production_plants])
 
         current_time = datetime.now().strftime('%H:%M')
