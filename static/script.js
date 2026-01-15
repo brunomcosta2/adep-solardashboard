@@ -200,13 +200,11 @@ async function fetchLiveData() {
 	  const fullLabels = generateFullDayXAxis();
 	  const currentLength = data.chart.x_axis ? data.chart.x_axis.length : 0;
 	
-	// --- Drop the very last available data point (if at least 2 points exist)
-	  const safeLength = currentLength > 2 ? currentLength - 2 : currentLength;
-
-	  const trimmedProduction = data.chart.production.slice(0, safeLength);
-	  const trimmedConsumption = data.chart.consumption.slice(0, safeLength);
-	  const trimmedSelfConsumption = data.chart.self_consumption.slice(0, safeLength);
-	  const trimmedSurplus = data.chart.surplus.slice(0, safeLength);
+	// Use all available data points (backend handles time filtering)
+	  const trimmedProduction = data.chart.production.slice(0, currentLength);
+	  const trimmedConsumption = data.chart.consumption.slice(0, currentLength);
+	  const trimmedSelfConsumption = data.chart.self_consumption.slice(0, currentLength);
+	  const trimmedSurplus = data.chart.surplus.slice(0, currentLength);
 	
 	  // Fill missing future points with null
 	  const paddedProduction = [...trimmedProduction];

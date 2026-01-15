@@ -12,6 +12,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 from datetime import datetime
+import copy
 from fusion_solar_py.client import FusionSolarClient
 from fusion_solar_py.exceptions import FusionSolarException
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -943,6 +944,43 @@ def _fetch_live_data():
         print(f"❌ Critical error in data fetch: {error_type}: {error_msg}")
         return {"error": "Erro ao carregar dados 😞"}
 
+def _update_chart_x_axis_for_current_time(cached_data):
+    """
+    Update the chart x_axis and pad data arrays with null values for time points
+    that have passed since the data was cached, but don't have data yet.
+    """
+    from datetime import datetime
+    current_time_str = datetime.now().strftime('%H:%M')
+    
+    # Generate full x_axis up to current time
+    x_axis = [f"{h:02d}:{m:02d}" for h in range(24) for m in range(0, 60, 5)]
+    filtered_axis = [t for t in x_axis if t <= current_time_str]
+    
+    if "chart" not in cached_data or not cached_data["chart"]:
+        return cached_data
+    
+    chart = cached_data["chart"]
+    old_x_axis = chart.get("x_axis", [])
+    old_length = len(old_x_axis)
+    new_length = len(filtered_axis)
+    
+    # If no new time points have passed, return data as-is
+    if new_length <= old_length:
+        return cached_data
+    
+    # Update x_axis to current time
+    chart["x_axis"] = filtered_axis
+    
+    # Pad all data arrays with null values for new time points
+    arrays_to_pad = ["production", "consumption", "self_consumption", "surplus"]
+    for array_name in arrays_to_pad:
+        if array_name in chart and isinstance(chart[array_name], list):
+            # Add null values for new time points
+            num_new_points = new_length - old_length
+            chart[array_name].extend([None] * num_new_points)
+    
+    return cached_data
+
 @app.route("/api/live-data")
 def live_data():
     """API endpoint with caching to reduce Fusion Solar API calls"""
@@ -953,10 +991,13 @@ def live_data():
         cache_age = current_time - _data_cache["timestamp"]
         
         if _data_cache["data"] is not None and cache_age < CACHE_DURATION:
-            # Return cached data (keep original last_updated from when it was fetched)
+            # Update x_axis to current time (adds null values for new time points)
+            # Use deepcopy to avoid modifying the original cached data
+            cached_data_copy = copy.deepcopy(_data_cache["data"])
+            cached_data_copy = _update_chart_x_axis_for_current_time(cached_data_copy)
             _LOGGER.info(f"Returning cached data (age: {int(cache_age)}s, remaining: {int(CACHE_DURATION - cache_age)}s)")
             print(f"📦 Returning cached data (age: {int(cache_age)}s)")
-            return jsonify(_data_cache["data"])
+            return jsonify(cached_data_copy)
         
         # Cache expired or doesn't exist, fetch fresh data
         _LOGGER.info("Cache expired or missing, fetching fresh data from Fusion Solar API...")
