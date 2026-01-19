@@ -6,7 +6,7 @@ if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
-from flask import Flask, render_template, jsonify, send_from_directory
+from flask import Flask, render_template, jsonify, send_from_directory, request
 import time
 import logging
 from logging.handlers import RotatingFileHandler
@@ -104,6 +104,20 @@ fusion_solar_logger.addFilter(captcha_filter)
 is_production = os.environ.get('FLASK_ENV') == 'production' or os.environ.get('ENVIRONMENT') == 'production'
 
 app = Flask(__name__)
+
+# Disable caching for static files in development
+# This ensures browser always gets latest version of JS/CSS files
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+if app.debug:
+    # In debug mode, add cache-busting headers
+    @app.after_request
+    def add_no_cache_headers(response):
+        if request.endpoint and 'static' in request.endpoint:
+            response.cache_control.no_store = True
+            response.cache_control.no_cache = True
+            response.cache_control.must_revalidate = True
+            response.cache_control.max_age = 0
+        return response
 
 # Set debug mode based on environment
 # In production with gunicorn, debug should be False for security
@@ -590,6 +604,30 @@ def get_inverter_ids(self, plant_id: str) -> list:
         _LOGGER.warning(f"Failed to get inverter IDs for plant {plant_id}: {e}", exc_info=True)
         return []
 
+def get_plant_alarm_data(self, plant_id: str) -> dict:
+    """Retrieves alarm data for a specific plant
+    :param plant_id: The plant's id (stationDn)
+    :type plant_id: str
+    :return: Alarm data for the plant
+    :rtype: dict
+    """
+    url = f"https://{self._huawei_subdomain}.fusionsolar.huawei.com/rest/pvms/fm/v1/query"
+    request_data = {
+        "dataType": "CURRENT",
+        "domainType": "OC_SOLAR",
+        "pageNo": 1,
+        "pageSize": 100,
+        "nativeMeDn": plant_id  # Use plant_id instead of device_dn
+    }
+    _LOGGER.debug(f"get_plant_alarm_data: Calling API with plant_id={plant_id}, request_data={request_data}")
+    r = self._session.post(url=url, json=request_data)
+    r.raise_for_status()
+    response = r.json()
+    _LOGGER.debug(f"get_plant_alarm_data: API returned response type={type(response)}, keys={list(response.keys()) if isinstance(response, dict) else 'N/A'}")
+    if isinstance(response, dict) and "data" in response:
+        _LOGGER.debug(f"get_plant_alarm_data: response['data'] type={type(response['data'])}, keys={list(response['data'].keys()) if isinstance(response['data'], dict) else 'N/A'}")
+    return response
+
 # Monkey-patch additional methods to FusionSolarClient
 FusionSolarClient.get_current_plant_data = get_current_plant_data
 FusionSolarClient.get_plant_stats_yearly = get_plant_stats_yearly
@@ -597,6 +635,7 @@ FusionSolarClient.get_plant_stats_monthly = get_plant_stats_monthly
 FusionSolarClient.get_power_status = get_power_status
 FusionSolarClient.get_plant_stats = get_plant_stats
 FusionSolarClient.get_inverter_ids = get_inverter_ids
+FusionSolarClient.get_plant_alarm_data = get_plant_alarm_data
 
 # Note: get_alarm_data() already exists in fusion_solar_py library, no monkey-patch needed
 # The method is available at: FusionSolarClient.get_alarm_data(device_dn)
@@ -983,137 +1022,341 @@ def process_account(account):
 
             surplus_power = max(production_power - consumption_power, 0)
 
-            # Check for active alarms for all installations
+            # Check for active alarms ONLY for disconnected plants (to reduce API calls)
             active_alarms = []
-            try:
-                _LOGGER.info(f"🔍 Checking for active alarms in {plant_name} (plant_id: {plant_id})...")
-                # Verify client has get_inverter_ids (monkey-patched method)
-                # Note: get_alarm_data() exists in fusion_solar_py library, so it's always available
-                if not hasattr(client, 'get_inverter_ids'):
-                    _LOGGER.error(f"get_inverter_ids method not found on client for {plant_name}")
-                else:
-                    # Get inverter IDs for this plant
-                    _LOGGER.info(f"Calling get_inverter_ids for {plant_name}...")
-                    inverter_ids = client.get_inverter_ids(plant_id)
-                    _LOGGER.info(f"get_inverter_ids returned {len(inverter_ids)} inverter(s) for {plant_name}: {inverter_ids}")
+            if plant['plantStatus'] == 'disconnected':
+                try:
+                    _LOGGER.info(f"🔍 Checking for active alarms in {plant_name} (plant_id: {plant_id}) - plant is disconnected...")
                     
-                    if inverter_ids:
-                        # Check alarms for each inverter
-                        # get_alarm_data() is part of fusion_solar_py library, so it's always available
-                        for inverter_id in inverter_ids:
-                            # Skip if inverter_id is None or empty
-                            if not inverter_id:
-                                _LOGGER.warning(f"Skipping alarm check for {plant_name}: inverter_id is None or empty")
-                                continue
+                    # First, check for plant-level alarms
+                    try:
+                        _LOGGER.info(f"Calling get_plant_alarm_data for {plant_name} (plant_id: {plant_id})...")
+                        plant_alarm_data = client.get_plant_alarm_data(plant_id)
+                        _LOGGER.info(f"get_plant_alarm_data returned for {plant_name}: {type(plant_alarm_data)}, keys: {list(plant_alarm_data.keys()) if isinstance(plant_alarm_data, dict) else 'N/A'}")
+                        
+                        # Parse plant alarm response - flexible structure handling
+                        # API can return different structures:
+                        # 1. {success: true, data: {hits: [...]}}
+                        # 2. {success: true, data: {success: true, data: {hits: [...]}}}
+                        # 3. Test script wraps: {data: {success: true, data: {success: true, data: {hits: [...]}}}}
+                        plant_alarms = []
+                        if isinstance(plant_alarm_data, dict):
+                            _LOGGER.debug(f"🔍 Parsing plant alarm data structure for {plant_name}...")
+                            _LOGGER.debug(f"   Root level - keys: {list(plant_alarm_data.keys())}, success: {plant_alarm_data.get('success')}")
                             
-                            try:
-                                _LOGGER.info(f"Calling get_alarm_data for inverter {inverter_id} in {plant_name}...")
-                                alarm_data = client.get_alarm_data(device_dn=inverter_id)
-                                _LOGGER.info(f"get_alarm_data returned for {plant_name}: {type(alarm_data)}, keys: {list(alarm_data.keys()) if isinstance(alarm_data, dict) else 'N/A'}")
+                            # Helper function to recursively find 'hits' key
+                            def find_hits(data, path="root", max_depth=5):
+                                """Recursively search for 'hits' key in nested dict structure"""
+                                if max_depth <= 0:
+                                    return None
                                 
-                                # Parse alarm response - structure may vary
-                                alarms = []
+                                if not isinstance(data, dict):
+                                    return None
                                 
-                                # Try different possible response structures
-                                if isinstance(alarm_data, dict):
-                                    if alarm_data.get("success") and "data" in alarm_data:
-                                        data = alarm_data["data"]
-                                        # Could be a list directly or nested
-                                        if isinstance(data, list):
-                                            alarms = data
-                                        elif isinstance(data, dict):
-                                            alarms = data.get("list", []) or data.get("alarms", []) or data.get("data", [])
-                                    elif "list" in alarm_data:
-                                        alarms = alarm_data["list"]
-                                    elif "alarms" in alarm_data:
-                                        alarms = alarm_data["alarms"]
+                                # Check if 'hits' is directly in this level
+                                if "hits" in data:
+                                    hits = data["hits"]
+                                    if isinstance(hits, list):
+                                        _LOGGER.debug(f"   ✅ Found 'hits' at {path}, length: {len(hits)}")
+                                        return hits
                                 
-                                _LOGGER.info(f"Parsed {len(alarms)} alarm(s) from response for {plant_name}")
+                                # Recursively search in 'data' key if it exists
+                                if "data" in data:
+                                    nested_data = data["data"]
+                                    if isinstance(nested_data, dict):
+                                        result = find_hits(nested_data, f"{path}.data", max_depth - 1)
+                                        if result is not None:
+                                            return result
                                 
-                                if alarms:
-                                    for alarm in alarms:
-                                        if not isinstance(alarm, dict):
-                                            continue
-                                            
-                                        alarm_name = alarm.get("alarmName") or alarm.get("name") or alarm.get("alarm_name") or "Alarme desconhecido"
-                                        alarm_level = alarm.get("alarmLevel") or alarm.get("level") or alarm.get("alarm_level") or ""
-                                        alarm_time = alarm.get("alarmTime") or alarm.get("time") or alarm.get("alarm_time") or alarm.get("occurTime") or ""
-                                        
-                                        # Format alarm time if available
-                                        alarm_time_str = "N/A"
-                                        if alarm_time:
+                                return None
+                            
+                            # Try to find hits recursively
+                            plant_alarms = find_hits(plant_alarm_data) or []
+                            
+                            if not plant_alarms:
+                                # Fallback: try direct access patterns for common structures
+                                # Pattern 1: {success: true, data: {hits: [...]}}
+                                if plant_alarm_data.get("success") and "data" in plant_alarm_data:
+                                    level1 = plant_alarm_data["data"]
+                                    if isinstance(level1, dict) and "hits" in level1:
+                                        plant_alarms = level1["hits"] if isinstance(level1["hits"], list) else []
+                                        _LOGGER.debug(f"   ✅ Found hits using pattern 1 (direct data.hits)")
+                                
+                                # Pattern 2: {success: true, data: {success: true, data: {hits: [...]}}}
+                                if not plant_alarms and plant_alarm_data.get("success") and "data" in plant_alarm_data:
+                                    level1 = plant_alarm_data["data"]
+                                    if isinstance(level1, dict) and level1.get("success") and "data" in level1:
+                                        level2 = level1["data"]
+                                        if isinstance(level2, dict) and "hits" in level2:
+                                            plant_alarms = level2["hits"] if isinstance(level2["hits"], list) else []
+                                            _LOGGER.debug(f"   ✅ Found hits using pattern 2 (nested data.data.hits)")
+                            
+                            if plant_alarms:
+                                _LOGGER.info(f"   ✅ Successfully extracted {len(plant_alarms)} alarm(s) from response")
+                            else:
+                                _LOGGER.warning(f"   ❌ Could not find 'hits' array in response structure")
+                        
+                        _LOGGER.info(f"Parsed {len(plant_alarms)} plant-level alarm(s) from response for {plant_name}")
+                        
+                        # Enhanced logging if no alarms found - this will help debug the structure
+                        # Debug logging only if no alarms found
+                        if len(plant_alarms) == 0 and isinstance(plant_alarm_data, dict):
+                            _LOGGER.debug(f"⚠️ No alarms parsed for {plant_name}. Response structure:")
+                            _LOGGER.debug(f"   Root keys: {list(plant_alarm_data.keys())}")
+                            _LOGGER.debug(f"   Root success: {plant_alarm_data.get('success')}")
+                            
+                            # Check if there's a totalCount indicating alarms exist
+                            def find_total_count(data, path="root", max_depth=5):
+                                """Recursively search for 'totalCount' key"""
+                                if max_depth <= 0:
+                                    return None
+                                if not isinstance(data, dict):
+                                    return None
+                                if "totalCount" in data:
+                                    return data["totalCount"]
+                                if "data" in data and isinstance(data["data"], dict):
+                                    return find_total_count(data["data"], f"{path}.data", max_depth - 1)
+                                return None
+                            
+                            total_count = find_total_count(plant_alarm_data)
+                            if total_count and total_count > 0:
+                                _LOGGER.warning(f"   ⚠️ Response indicates {total_count} alarm(s) exist (totalCount={total_count}) but 'hits' array not found or empty!")
+                                _LOGGER.warning(f"   This may indicate a parsing issue. Full structure:")
+                                import json
+                                _LOGGER.warning(f"   {json.dumps(plant_alarm_data, indent=2, default=str)[:1000]}")  # First 1000 chars
+                        if plant_alarms:
+                            for alarm in plant_alarms:
+                                if not isinstance(alarm, dict):
+                                    continue
+                                
+                                # Extract alarmName (required field from JSON structure)
+                                alarm_name = alarm.get("alarmName") or "Alarme desconhecido"
+                                
+                                # Extract severity (can be number 2 or string "2")
+                                severity = alarm.get("severity")
+                                if severity is None:
+                                    severity = alarm.get("alarmLevel") or ""
+                                
+                                # Extract time - prefer latestOccurTime (timestamp in ms), fallback to occurTimeStr (formatted string)
+                                latest_occur_time = alarm.get("latestOccurTime")
+                                occur_time_str = alarm.get("occurTimeStr")
+                                
+                                # Format alarm time if available
+                                alarm_time_str = "N/A"
+                                if latest_occur_time:
+                                    try:
+                                        # latestOccurTime is timestamp in milliseconds (e.g., 1768764611756)
+                                        if isinstance(latest_occur_time, (int, float)):
+                                            alarm_dt = datetime.fromtimestamp(latest_occur_time / 1000)
+                                            alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                    except Exception as time_error:
+                                        _LOGGER.debug(f"Could not parse latestOccurTime: {latest_occur_time}, error: {time_error}")
+                                        # Fallback to occurTimeStr if available
+                                        if occur_time_str:
                                             try:
-                                                # Try different time formats
-                                                if isinstance(alarm_time, (int, float)):
-                                                    # Timestamp in milliseconds
-                                                    alarm_dt = datetime.fromtimestamp(alarm_time / 1000)
+                                                alarm_dt = datetime.strptime(occur_time_str, "%Y-%m-%d %H:%M:%S")
+                                                alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                            except:
+                                                alarm_time_str = str(occur_time_str)
+                                elif occur_time_str:
+                                    try:
+                                        # occurTimeStr is formatted string "2026-01-18 19:30:11"
+                                        alarm_dt = datetime.strptime(occur_time_str, "%Y-%m-%d %H:%M:%S")
+                                        alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                    except Exception as time_error:
+                                        _LOGGER.debug(f"Could not parse occurTimeStr: {occur_time_str}, error: {time_error}")
+                                        alarm_time_str = str(occur_time_str)
+                                
+                                # Map severity to emoji (1=Critical, 2=Major, 3=Minor, 4=Warning)
+                                level_emoji = {
+                                    "1": "🔴",  # Critical
+                                    "2": "🟠",  # Major
+                                    "3": "🟡",  # Minor
+                                    "4": "⚪",  # Warning
+                                    "critical": "🔴",
+                                    "major": "🟠",
+                                    "minor": "🟡",
+                                    "warning": "⚪"
+                                }.get(str(severity).lower(), "⚠️")
+                                
+                                active_alarms.append({
+                                    "device": "Instalação",
+                                    "name": alarm_name,
+                                    "level": severity,
+                                    "time": alarm_time_str,
+                                    "emoji": level_emoji
+                                })
+                                _LOGGER.warning(f"🚨 Active plant alarm in {plant_name}: {alarm_name} (Severity {severity}) at {alarm_time_str}")
+                                print(f"    🚨 {plant_name} (Instalação): {alarm_name} (Severidade {severity}) - {alarm_time_str}")
+                    except FusionSolarException as plant_alarm_error:
+                        error_msg = str(plant_alarm_error)
+                        _LOGGER.warning(f"FusionSolar API error getting plant alarms for {plant_name}: {error_msg}")
+                    except Exception as plant_alarm_error:
+                        error_msg = str(plant_alarm_error)
+                        error_type = type(plant_alarm_error).__name__
+                        _LOGGER.warning(f"Failed to get plant alarms for {plant_name}: {error_type} - {error_msg}", exc_info=True)
+                    
+                    # Then, check for inverter alarms
+                    # Verify client has get_inverter_ids (monkey-patched method)
+                    # Note: get_alarm_data() exists in fusion_solar_py library, so it's always available
+                    if not hasattr(client, 'get_inverter_ids'):
+                        _LOGGER.error(f"get_inverter_ids method not found on client for {plant_name}")
+                    else:
+                        # Get inverter IDs for this plant
+                        _LOGGER.info(f"Calling get_inverter_ids for {plant_name}...")
+                        inverter_ids = client.get_inverter_ids(plant_id)
+                        _LOGGER.info(f"get_inverter_ids returned {len(inverter_ids)} inverter(s) for {plant_name}: {inverter_ids}")
+                        
+                        if inverter_ids:
+                            # Check alarms for each inverter
+                            # get_alarm_data() is part of fusion_solar_py library, so it's always available
+                            for inverter_id in inverter_ids:
+                                # Skip if inverter_id is None or empty
+                                if not inverter_id:
+                                    _LOGGER.warning(f"Skipping alarm check for {plant_name}: inverter_id is None or empty")
+                                    continue
+                                
+                                try:
+                                    _LOGGER.info(f"Calling get_alarm_data for inverter {inverter_id} in {plant_name}...")
+                                    alarm_data = client.get_alarm_data(device_dn=inverter_id)
+                                    _LOGGER.info(f"get_alarm_data returned for {plant_name}: {type(alarm_data)}, keys: {list(alarm_data.keys()) if isinstance(alarm_data, dict) else 'N/A'}")
+                                    
+                                    # Parse alarm response - structure: data.data.data.hits[] (same as get_plant_alarm_data)
+                                    alarms = []
+                                    if isinstance(alarm_data, dict):
+                                        # Structure: {success: true, data: {success: true, data: {hits: [...]}}}
+                                        if alarm_data.get("success") and "data" in alarm_data:
+                                            level1_data = alarm_data["data"]
+                                            if isinstance(level1_data, dict) and level1_data.get("success") and "data" in level1_data:
+                                                level2_data = level1_data["data"]
+                                                if isinstance(level2_data, dict) and "hits" in level2_data:
+                                                    alarms = level2_data["hits"]
+                                                    if not isinstance(alarms, list):
+                                                        alarms = []
+                                    
+                                    _LOGGER.info(f"Parsed {len(alarms)} alarm(s) from response for {plant_name}")
+                                    if len(alarms) == 0 and isinstance(alarm_data, dict):
+                                        _LOGGER.debug(f"No alarms found for inverter {inverter_id}. Checking structure...")
+                                        if "data" in alarm_data:
+                                            level1 = alarm_data["data"]
+                                            if isinstance(level1, dict) and "data" in level1:
+                                                level2 = level1["data"]
+                                                if isinstance(level2, dict) and "hits" in level2:
+                                                    _LOGGER.debug(f"Found hits array with {len(level2['hits']) if isinstance(level2['hits'], list) else 'N/A'} items")
+                                    
+                                    if alarms:
+                                        for alarm in alarms:
+                                            if not isinstance(alarm, dict):
+                                                continue
+                                                
+                                            # Extract alarmName (required field from JSON structure)
+                                            alarm_name = alarm.get("alarmName") or "Alarme desconhecido"
+                                            
+                                            # Extract severity (can be number or string)
+                                            severity = alarm.get("severity")
+                                            if severity is None:
+                                                severity = alarm.get("alarmLevel") or ""
+                                            
+                                            # Extract time - prefer latestOccurTime (timestamp in ms), fallback to occurTimeStr
+                                            latest_occur_time = alarm.get("latestOccurTime")
+                                            occur_time_str = alarm.get("occurTimeStr")
+                                            alarm_time = latest_occur_time or occur_time_str or alarm.get("occurTime") or ""
+                                            
+                                            # Format alarm time if available
+                                            alarm_time_str = "N/A"
+                                            if latest_occur_time:
+                                                try:
+                                                    # latestOccurTime is timestamp in milliseconds
+                                                    if isinstance(latest_occur_time, (int, float)):
+                                                        alarm_dt = datetime.fromtimestamp(latest_occur_time / 1000)
+                                                        alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                                except Exception as time_error:
+                                                    _LOGGER.debug(f"Could not parse latestOccurTime: {latest_occur_time}, error: {time_error}")
+                                                    # Fallback to occurTimeStr if available
+                                                    if occur_time_str:
+                                                        try:
+                                                            alarm_dt = datetime.strptime(occur_time_str, "%Y-%m-%d %H:%M:%S")
+                                                            alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                                        except:
+                                                            alarm_time_str = str(occur_time_str)
+                                            elif occur_time_str:
+                                                try:
+                                                    # occurTimeStr is formatted string "2026-01-18 19:30:11"
+                                                    alarm_dt = datetime.strptime(occur_time_str, "%Y-%m-%d %H:%M:%S")
                                                     alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
-                                                elif isinstance(alarm_time, str):
-                                                    # Try parsing as timestamp or date string
-                                                    try:
+                                                except Exception as time_error:
+                                                    _LOGGER.debug(f"Could not parse occurTimeStr: {occur_time_str}, error: {time_error}")
+                                                    alarm_time_str = str(occur_time_str)
+                                            elif alarm_time:
+                                                try:
+                                                    # Fallback: try parsing as timestamp or date string
+                                                    if isinstance(alarm_time, (int, float)):
+                                                        alarm_dt = datetime.fromtimestamp(alarm_time / 1000)
+                                                        alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                                    elif isinstance(alarm_time, str):
                                                         if alarm_time.isdigit():
                                                             alarm_dt = datetime.fromtimestamp(int(alarm_time) / 1000)
                                                             alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
                                                         else:
-                                                            # Try parsing as date string
-                                                            alarm_dt = datetime.strptime(alarm_time, "%Y-%m-%d %H:%M:%S")
-                                                            alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
-                                                    except:
-                                                        alarm_time_str = alarm_time
-                                            except Exception as time_error:
-                                                _LOGGER.debug(f"Could not parse alarm time: {alarm_time}, error: {time_error}")
-                                                alarm_time_str = str(alarm_time)
-                                        
-                                        # Map alarm level to emoji
-                                        level_emoji = {
-                                            "1": "🔴",  # Critical
-                                            "2": "🟠",  # Major
-                                            "3": "🟡",  # Minor
-                                            "4": "⚪",  # Warning
-                                            "critical": "🔴",
-                                            "major": "🟠",
-                                            "minor": "🟡",
-                                            "warning": "⚪"
-                                        }.get(str(alarm_level).lower(), "⚠️")
-                                        
-                                        active_alarms.append({
-                                            "device": "Inversor",
-                                            "name": alarm_name,
-                                            "level": alarm_level,
-                                            "time": alarm_time_str,
-                                            "emoji": level_emoji
-                                        })
-                                        _LOGGER.warning(f"🚨 Active alarm in {plant_name} - Inversor: {alarm_name} (Level {alarm_level}) at {alarm_time_str}")
-                                        print(f"    🚨 {plant_name}: {alarm_name} (Nível {alarm_level}) - {alarm_time_str}")
-                            except FusionSolarException as alarm_error:
-                                error_msg = str(alarm_error)
-                                _LOGGER.warning(f"FusionSolar API error getting alarms for inverter {inverter_id} in {plant_name}: {error_msg}")
-                                continue
-                            except Exception as alarm_error:
-                                error_msg = str(alarm_error)
-                                error_type = type(alarm_error).__name__
-                                _LOGGER.warning(f"Failed to get alarms for inverter {inverter_id} in {plant_name}: {error_type} - {error_msg}", exc_info=True)
-                                continue
-                    
-                    if active_alarms:
-                        _LOGGER.info(f"Found {len(active_alarms)} active alarm(s) in {plant_name}")
-                        print(f"    ⚠️  {plant_name}: {len(active_alarms)} alarme(s) ativo(s)")
-                        # Add alarms to alerts
-                        for alarm in active_alarms:
-                            result["alerts"].append(
-                                f"{alarm['emoji']} {plant_name} - {alarm['name']} (Inversor, {alarm['time']})"
-                            )
-                    else:
-                        _LOGGER.debug(f"No active alarms found in {plant_name}")
-            except AttributeError as e:
-                error_msg = str(e)
-                _LOGGER.error(f"Attribute error when checking alarms for {plant_name}: {error_msg}", exc_info=True)
-                print(f"    ❌ Erro ao verificar alarmes em {plant_name}: método não disponível")
-            except Exception as e:
-                error_msg = str(e)
-                error_type = type(e).__name__
-                _LOGGER.warning(f"Error checking alarms for {plant_name}: {error_type} - {error_msg}", exc_info=True)
-                # Don't fail the whole process if alarm check fails - just log and continue
+                                                            alarm_time_str = str(alarm_time)
+                                                except Exception as time_error:
+                                                    _LOGGER.debug(f"Could not parse alarm time: {alarm_time}, error: {time_error}")
+                                                    alarm_time_str = str(alarm_time)
+                                            
+                                            # Map severity to emoji (1=Critical, 2=Major, 3=Minor, 4=Warning)
+                                            level_emoji = {
+                                                "1": "🔴",  # Critical
+                                                "2": "🟠",  # Major
+                                                "3": "🟡",  # Minor
+                                                "4": "⚪",  # Warning
+                                                "critical": "🔴",
+                                                "major": "🟠",
+                                                "minor": "🟡",
+                                                "warning": "⚪"
+                                            }.get(str(severity).lower(), "⚠️")
+                                            
+                                            active_alarms.append({
+                                                "device": "Inversor",
+                                                "name": alarm_name,
+                                                "level": severity,
+                                                "time": alarm_time_str,
+                                                "emoji": level_emoji
+                                            })
+                                            _LOGGER.warning(f"🚨 Active alarm in {plant_name} - Inversor: {alarm_name} (Severity {severity}) at {alarm_time_str}")
+                                            print(f"    🚨 {plant_name}: {alarm_name} (Severidade {severity}) - {alarm_time_str}")
+                                except FusionSolarException as alarm_error:
+                                    error_msg = str(alarm_error)
+                                    _LOGGER.warning(f"FusionSolar API error getting alarms for inverter {inverter_id} in {plant_name}: {error_msg}")
+                                    continue
+                                except Exception as alarm_error:
+                                    error_msg = str(alarm_error)
+                                    error_type = type(alarm_error).__name__
+                                    _LOGGER.warning(f"Failed to get alarms for inverter {inverter_id} in {plant_name}: {error_type} - {error_msg}", exc_info=True)
+                                    continue
+                        
+                        if active_alarms:
+                            _LOGGER.info(f"Found {len(active_alarms)} active alarm(s) in {plant_name}")
+                            print(f"    ⚠️  {plant_name}: {len(active_alarms)} alarme(s) ativo(s)")
+                            # Add alarms to alerts
+                            for alarm in active_alarms:
+                                device_type = alarm.get('device', 'Dispositivo')
+                                result["alerts"].append(
+                                    f"{alarm['emoji']} {plant_name} - {alarm['name']} ({device_type}, {alarm['time']})"
+                                )
+                        else:
+                            _LOGGER.debug(f"No active alarms found in {plant_name}")
+                except AttributeError as e:
+                    error_msg = str(e)
+                    _LOGGER.error(f"Attribute error when checking alarms for {plant_name}: {error_msg}", exc_info=True)
+                    print(f"    ❌ Erro ao verificar alarmes em {plant_name}: método não disponível")
+                except Exception as e:
+                    error_msg = str(e)
+                    error_type = type(e).__name__
+                    _LOGGER.warning(f"Error checking alarms for {plant_name}: {error_type} - {error_msg}", exc_info=True)
+                    # Don't fail the whole process if alarm check fails - just log and continue
+            else:
+                # Plant is connected, skip alarm check to reduce API calls
+                _LOGGER.debug(f"Skipping alarm check for {plant_name} - plant is connected")
 
             result["statuses"].append({
                 "name": plant['name'],

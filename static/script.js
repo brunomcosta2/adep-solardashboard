@@ -362,7 +362,6 @@ async function fetchLiveData() {
 	// Wait a bit for DOM to update and ensure table wrapper is ready
 	setTimeout(() => {
 	  if (data.statuses.length > 0) {
-	    console.log('Auto-scroll: Table populated with', data.statuses.length, 'rows');
 	    // Ensure tableWrapper is available
 	    if (!tableWrapper) {
 	      tableWrapper = document.querySelector('.table-wrapper');
@@ -375,8 +374,6 @@ async function fetchLiveData() {
 	        startAutoScroll();
 	      }, 100);
 	    }
-	  } else {
-	    console.log('Auto-scroll: No data in table');
 	  }
 	}, 500); // Increased timeout to ensure DOM is fully updated
 	
@@ -600,7 +597,6 @@ function autoScrollTable() {
     if (!scrollPaused) {
       scrollPaused = true;
       const wasAtBottom = isAtBottom; // Store which edge we hit
-      console.log('Auto-scroll: Paused at', isAtTop ? 'top' : 'bottom', 'scrollTop =', Math.round(currentScroll), 'maxScroll =', Math.round(maxScroll), 'direction before:', scrollDirection > 0 ? 'down' : 'up');
       
       // Ensure we're exactly at the edge
       if (isAtTop) {
@@ -619,7 +615,6 @@ function autoScrollTable() {
         // Reverse direction
         scrollDirection *= -1;
         scrollPaused = false;
-        console.log('Auto-scroll: Resuming after pause, new direction =', scrollDirection > 0 ? 'down' : 'up', 'isScrolling:', isScrolling);
         
         // Force immediate scroll to get out of the edge detection
         // Move slightly away from the edge based on new direction
@@ -634,8 +629,6 @@ function autoScrollTable() {
           tableWrapper.scrollTop = Math.min(maxScrollAfterPause, 10);
         }
         
-        console.log('Auto-scroll: Position after direction change:', Math.round(tableWrapper.scrollTop), '/', Math.round(maxScrollAfterPause));
-        
         // Continue scrolling in new direction
         if (isScrolling) {
           scrollAnimationFrame = requestAnimationFrame(autoScrollTable);
@@ -648,11 +641,19 @@ function autoScrollTable() {
   // Continuous scroll
   const oldScrollTop = tableWrapper.scrollTop;
   const newScrollTop = oldScrollTop + (scrollSpeed * scrollDirection);
-  tableWrapper.scrollTop = newScrollTop;
   
-  // Verify scroll actually changed (debug)
-  if (Math.abs(tableWrapper.scrollTop - oldScrollTop) < 0.1 && scrollSpeed > 0) {
-    console.warn('Auto-scroll: Scroll position did not change! scrollTop:', tableWrapper.scrollTop, 'oldScrollTop:', oldScrollTop);
+  // Clamp new scroll position to valid range
+  const clampedScrollTop = Math.max(0, Math.min(maxScroll, newScrollTop));
+  
+  // Only update if position would actually change
+  if (Math.abs(clampedScrollTop - oldScrollTop) >= 0.1) {
+    tableWrapper.scrollTop = clampedScrollTop;
+  } else {
+    // We've reached a limit - the edge detection above should catch this
+    // but if it doesn't, schedule next frame to let edge detection handle it
+    // This prevents infinite loops while ensuring scroll continues
+    scrollAnimationFrame = requestAnimationFrame(autoScrollTable);
+    return;
   }
   
   // Schedule next frame - must always be called to continue animation
@@ -676,7 +677,6 @@ function startAutoScroll() {
   }
   
   if (!tableWrapper) {
-    console.log('Auto-scroll: tableWrapper not found');
     return;
   }
   
@@ -688,17 +688,14 @@ function startAutoScroll() {
   
   // Check if scrolling is needed
   const maxScroll = tableWrapper.scrollHeight - tableWrapper.clientHeight;
-  console.log('Auto-scroll: Checking - scrollHeight =', tableWrapper.scrollHeight, 'clientHeight =', tableWrapper.clientHeight, 'maxScroll =', maxScroll);
   
   if (maxScroll <= 0) {
     // Table doesn't need scrolling
-    console.log('Auto-scroll: Table content fits, no scrolling needed');
     isScrolling = false;
     return;
   }
   
   // Always reset and start scrolling
-  console.log('Auto-scroll: Starting scroll, current scrollTop =', tableWrapper.scrollTop, 'maxScroll =', maxScroll, 'scrollSpeed =', scrollSpeed);
   isScrolling = true;
   scrollPaused = false; // Reset paused state when starting
   scrollDirection = 1; // Always start scrolling down
@@ -706,7 +703,6 @@ function startAutoScroll() {
   // Start the animation loop immediately
   if (!scrollAnimationFrame) {
     scrollAnimationFrame = requestAnimationFrame(autoScrollTable);
-    console.log('Auto-scroll: Animation frame requested, isScrolling =', isScrolling);
   }
 }
 
