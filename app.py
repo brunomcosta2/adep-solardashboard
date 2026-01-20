@@ -15,6 +15,7 @@ from datetime import datetime
 import copy
 from fusion_solar_py.client import FusionSolarClient
 from fusion_solar_py.exceptions import FusionSolarException
+from requests.exceptions import HTTPError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
@@ -933,6 +934,7 @@ def process_account(account):
         "summed_consumption": None,
         "summed_self_consumption": None,
         "summed_overflow": None,
+        "summed_grid": None,  # NOVO: série para Consumo da Rede no gráfico
     }
 
     try:
@@ -970,7 +972,20 @@ def process_account(account):
 
         number_plants = len(plants)
         print(f"Found {number_plants} stations for account {USER}")
-        installed_capacity_map = {p["name"]: float(p["installedCapacity"]) for p in plants}
+        # Build installed capacity map - support both field names (installedCapacity and onlyInverterPower)
+        installed_capacity_map = {}
+        for p in plants:
+            plant_name = p["name"]
+            # Try installedCapacity first, then onlyInverterPower, default to 0
+            capacity = (
+                p.get("installedCapacity") or 
+                p.get("onlyInverterPower") or 
+                0
+            )
+            try:
+                installed_capacity_map[plant_name] = float(capacity)
+            except (ValueError, TypeError):
+                installed_capacity_map[plant_name] = 0.0
 
         for i, plant in enumerate(plants, start=1):
             plant_id = plant['dn']
@@ -988,41 +1003,64 @@ def process_account(account):
                 _LOGGER.debug(f"Successfully retrieved data for plant: {plant_name}")
             except FusionSolarException as e:
                 error_msg = str(e)
-                _LOGGER.error(f"FusionSolar API error fetching data for {plant_name} (ID: {plant_id}): {error_msg}")
-                print(f"    ❌ API error for {plant_name}: {error_msg}")
-                # Continue with next plant even if this one fails
-                result["statuses"].append({
-                    "name": plant_name,
-                    "pinstalled": installed_capacity,
-                    "production": 0.0,
-                    "consumption": 0.0,
-                    "grid": 0.0,
-                    "surplus": 0.0,
-                    "status_icon": "🔴"
-                })
-                # Add detailed error message (truncated if too long)
-                error_display = error_msg[:80] + "..." if len(error_msg) > 80 else error_msg
-                result["alerts"].append(f"🔴 {plant_name} - Erro ao buscar dados: {error_display}")
-                continue
+                _LOGGER.warning(f"FusionSolar API error fetching data for {plant_name} (ID: {plant_id}) on first attempt: {error_msg}")
+                print(f"    ⚠️  API error for {plant_name} (1ª tentativa): {error_msg}")
+                # Retry after 10 seconds
+                time.sleep(10)
+                try:
+                    _LOGGER.info(f"Retrying get_plant_stats/get_last_plant_data for {plant_name} after error...")
+                    plant_stats = client.get_plant_stats(plant_id)
+                    plant_data = client.get_last_plant_data(plant_stats)
+                    _LOGGER.debug(f"Successfully retrieved data for plant on retry: {plant_name}")
+                except FusionSolarException as e_retry:
+                    retry_msg = str(e_retry)
+                    _LOGGER.error(f"FusionSolar API error fetching data for {plant_name} (ID: {plant_id}) after retry: {retry_msg}")
+                    print(f"    ❌ API error for {plant_name} após retry: {retry_msg}")
+                    # Continue with next plant even if this one fails
+                    result["statuses"].append({
+                        "name": plant_name,
+                        "pinstalled": installed_capacity,
+                        "production": 0.0,
+                        "consumption": 0.0,
+                        "grid": 0.0,
+                        "surplus": 0.0,
+                        "status_icon": "🔴"
+                    })
+                    # Add detailed error message (truncated if too long)
+                    error_display = retry_msg[:80] + "..." if len(retry_msg) > 80 else retry_msg
+                    result["alerts"].append(f"🔴 {plant_name} - Erro ao buscar dados: {error_display}")
+                    continue
             except Exception as e:
                 error_msg = str(e)
                 error_type = type(e).__name__
-                _LOGGER.error(f"Error fetching data for plant {plant_name} (ID: {plant_id}): {error_type} - {error_msg}", exc_info=True)
-                print(f"    ❌ Erro ao buscar dados da instalação {plant_name}: {error_type}: {error_msg}")
-                # Continue with next plant even if this one fails
-                result["statuses"].append({
-                    "name": plant_name,
-                    "pinstalled": installed_capacity,
-                    "production": 0.0,
-                    "consumption": 0.0,
-                    "grid": 0.0,
-                    "surplus": 0.0,
-                    "status_icon": "🔴"
-                })
-                # Add detailed error message (truncated if too long)
-                error_display = error_msg[:80] + "..." if len(error_msg) > 80 else error_msg
-                result["alerts"].append(f"🔴 {plant_name} - Erro ao buscar dados: {error_display}")
-                continue
+                _LOGGER.warning(f"Error fetching data for plant {plant_name} (ID: {plant_id}) on first attempt: {error_type} - {error_msg}")
+                print(f"    ⚠️  Erro ao buscar dados da instalação {plant_name} (1ª tentativa): {error_type}: {error_msg}")
+                # Retry after 10 seconds
+                time.sleep(10)
+                try:
+                    _LOGGER.info(f"Retrying get_plant_stats/get_last_plant_data for {plant_name} after generic error...")
+                    plant_stats = client.get_plant_stats(plant_id)
+                    plant_data = client.get_last_plant_data(plant_stats)
+                    _LOGGER.debug(f"Successfully retrieved data for plant on retry: {plant_name}")
+                except Exception as e_retry:
+                    retry_msg = str(e_retry)
+                    retry_type = type(e_retry).__name__
+                    _LOGGER.error(f"Error fetching data for plant {plant_name} (ID: {plant_id}) after retry: {retry_type} - {retry_msg}", exc_info=True)
+                    print(f"    ❌ Erro ao buscar dados da instalação {plant_name} após retry: {retry_type}: {retry_msg}")
+                    # Continue with next plant even if this one fails
+                    result["statuses"].append({
+                        "name": plant_name,
+                        "pinstalled": installed_capacity,
+                        "production": 0.0,
+                        "consumption": 0.0,
+                        "grid": 0.0,
+                        "surplus": 0.0,
+                        "status_icon": "🔴"
+                    })
+                    # Add detailed error message (truncated if too long)
+                    error_display = retry_msg[:80] + "..." if len(retry_msg) > 80 else retry_msg
+                    result["alerts"].append(f"🔴 {plant_name} - Erro ao buscar dados: {error_display}")
+                    continue
 
             # Extract values and timestamps
             production_data = plant_data.get('productPower', {})
@@ -1042,7 +1080,12 @@ def process_account(account):
             
             _LOGGER.debug(f"Plant {plant_name} data - Production: {production_power} kW ({production_time}), Consumption: {consumption_power} kW ({consumption_time}), Grid: {grid_power} kW ({grid_time})")
 
-            # totals
+            # Store original values before potential override
+            original_production = production_power
+            original_consumption = consumption_power
+            original_grid = grid_power
+            
+            # totals (will be adjusted later if plant has alarms)
             result["production"] += production_power
             result["consumption"] += consumption_power
             result["grid"] += grid_power
@@ -1273,13 +1316,87 @@ def process_account(account):
                                     "name": alarm_name,
                                     "level": severity,
                                     "time": alarm_time_str,
-                                    "emoji": level_emoji
+                                    "emoji": level_emoji,
+                                    # raw_time usa o formato original da API (ex: "2026-01-19 11:00:13")
+                                    "raw_time": occur_time_str or ""
                                 })
                                 _LOGGER.warning(f"🚨 Active plant alarm in {plant_name}: {alarm_name} (Severity {severity}) at {alarm_time_str}")
                                 print(f"    🚨 {plant_name} (Instalação): {alarm_name} (Severidade {severity}) - {alarm_time_str}")
                     except FusionSolarException as plant_alarm_error:
                         error_msg = str(plant_alarm_error)
-                        _LOGGER.warning(f"FusionSolar API error getting plant alarms for {plant_name}: {error_msg}")
+                        _LOGGER.warning(f"FusionSolar API error getting plant alarms for {plant_name} on first attempt: {error_msg}")
+                        # Retry once after 10 seconds
+                        time.sleep(10)
+                        try:
+                            _LOGGER.info(f"Retrying get_plant_alarm_data for {plant_name} after error...")
+                            plant_alarm_data = client.get_plant_alarm_data(plant_id)
+                            _LOGGER.info(f"get_plant_alarm_data (retry) returned for {plant_name}: {type(plant_alarm_data)}, keys: {list(plant_alarm_data.keys()) if isinstance(plant_alarm_data, dict) else 'N/A'}")
+                            # Re-run parsing logic on retry
+                            plant_alarms = []
+                            if isinstance(plant_alarm_data, dict):
+                                _LOGGER.debug(f"🔍 Parsing plant alarm data structure for {plant_name} (retry)...")
+                                _LOGGER.debug(f"   Root level - keys: {list(plant_alarm_data.keys())}, success: {plant_alarm_data.get('success')}")
+                                def find_hits(data, path="root", max_depth=5):
+                                    if max_depth <= 0 or not isinstance(data, dict):
+                                        return None
+                                    if "hits" in data and isinstance(data["hits"], list):
+                                        return data["hits"]
+                                    if "data" in data and isinstance(data["data"], dict):
+                                        return find_hits(data["data"], f"{path}.data", max_depth-1)
+                                    return None
+                                plant_alarms = find_hits(plant_alarm_data) or []
+                            _LOGGER.info(f"Parsed {len(plant_alarms)} plant-level alarm(s) from retry response for {plant_name}")
+                            if plant_alarms:
+                                # Re-parse alarms with full formatting logic
+                                for alarm in plant_alarms:
+                                    if not isinstance(alarm, dict):
+                                        continue
+                                    alarm_name = alarm.get("alarmName") or "Alarme desconhecido"
+                                    severity = alarm.get("severity") or alarm.get("alarmLevel") or ""
+                                    
+                                    # Parse timestamp
+                                    alarm_time_str = ""
+                                    latest_occur_time = alarm.get("latestOccurTime")
+                                    occur_time_str = alarm.get("occurTimeStr")
+                                    
+                                    if latest_occur_time:
+                                        try:
+                                            # latestOccurTime is timestamp in milliseconds
+                                            alarm_dt = datetime.fromtimestamp(latest_occur_time / 1000)
+                                            alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                        except Exception:
+                                            alarm_time_str = str(latest_occur_time)
+                                    elif occur_time_str:
+                                        try:
+                                            alarm_dt = datetime.strptime(occur_time_str, "%Y-%m-%d %H:%M:%S")
+                                            alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                        except Exception:
+                                            alarm_time_str = str(occur_time_str)
+                                    
+                                    # Map severity to emoji
+                                    level_emoji = {
+                                        "1": "🔴",  # Critical
+                                        "2": "🟠",  # Major
+                                        "3": "🟡",  # Minor
+                                        "4": "⚪",  # Warning
+                                        "critical": "🔴",
+                                        "major": "🟠",
+                                        "minor": "🟡",
+                                        "warning": "⚪"
+                                    }.get(str(severity).lower(), "⚠️")
+                                    
+                                    active_alarms.append({
+                                        "device": "Instalação",
+                                        "name": alarm_name,
+                                        "level": severity,
+                                        "time": alarm_time_str,
+                                        "emoji": level_emoji,
+                                        "raw_time": occur_time_str or ""
+                                    })
+                        except Exception as retry_alarm_error:
+                            retry_msg = str(retry_alarm_error)
+                            retry_type = type(retry_alarm_error).__name__
+                            _LOGGER.warning(f"FusionSolar API error getting plant alarms for {plant_name} after retry: {retry_type} - {retry_msg}")
                     except Exception as plant_alarm_error:
                         error_msg = str(plant_alarm_error)
                         error_type = type(plant_alarm_error).__name__
@@ -1413,15 +1530,132 @@ def process_account(account):
                                             })
                                             _LOGGER.warning(f"🚨 Active alarm in {plant_name} - Inversor: {alarm_name} (Severity {severity}) at {alarm_time_str}")
                                             print(f"    🚨 {plant_name}: {alarm_name} (Severidade {severity}) - {alarm_time_str}")
-                                except FusionSolarException as alarm_error:
+                                except (FusionSolarException, HTTPError) as alarm_error:
                                     error_msg = str(alarm_error)
-                                    _LOGGER.warning(f"FusionSolar API error getting alarms for inverter {inverter_id} in {plant_name}: {error_msg}")
-                                    continue
+                                    error_type = type(alarm_error).__name__
+                                    _LOGGER.warning(f"API error getting alarms for inverter {inverter_id} in {plant_name} on first attempt: {error_type} - {error_msg}")
+                                    # Retry once after 10 seconds
+                                    time.sleep(10)
+                                    try:
+                                        _LOGGER.info(f"Retrying get_alarm_data for inverter {inverter_id} in {plant_name} after error...")
+                                        alarm_data = client.get_alarm_data(device_dn=inverter_id)
+                                        _LOGGER.info(f"get_alarm_data (retry) returned for {plant_name}: {type(alarm_data)}, keys: {list(alarm_data.keys()) if isinstance(alarm_data, dict) else 'N/A'}")
+                                        # Re-run parsing logic on retry (same as first attempt)
+                                        alarms = []
+                                        if isinstance(alarm_data, dict):
+                                            if alarm_data.get("success") and "data" in alarm_data:
+                                                level1_data = alarm_data["data"]
+                                                if isinstance(level1_data, dict) and level1_data.get("success") and "data" in level1_data:
+                                                    level2_data = level1_data["data"]
+                                                    if isinstance(level2_data, dict) and "hits" in level2_data:
+                                                        alarms = level2_data["hits"]
+                                                        if not isinstance(alarms, list):
+                                                            alarms = []
+                                        _LOGGER.info(f"Parsed {len(alarms)} alarm(s) from retry response for {plant_name}")
+                                        # Process alarms if found
+                                        if alarms:
+                                            for alarm in alarms:
+                                                if not isinstance(alarm, dict):
+                                                    continue
+                                                alarm_name = alarm.get("alarmName") or "Alarme desconhecido"
+                                                severity = alarm.get("severity") or alarm.get("alarmLevel") or ""
+                                                latest_occur_time = alarm.get("latestOccurTime")
+                                                occur_time_str = alarm.get("occurTimeStr")
+                                                alarm_time_str = "N/A"
+                                                if latest_occur_time:
+                                                    try:
+                                                        alarm_dt = datetime.fromtimestamp(latest_occur_time / 1000)
+                                                        alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                                    except Exception:
+                                                        alarm_time_str = str(latest_occur_time)
+                                                elif occur_time_str:
+                                                    try:
+                                                        alarm_dt = datetime.strptime(occur_time_str, "%Y-%m-%d %H:%M:%S")
+                                                        alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                                    except Exception:
+                                                        alarm_time_str = str(occur_time_str)
+                                                level_emoji = {
+                                                    "1": "🔴", "2": "🟠", "3": "🟡", "4": "⚪",
+                                                    "critical": "🔴", "major": "🟠", "minor": "🟡", "warning": "⚪"
+                                                }.get(str(severity).lower(), "⚠️")
+                                                active_alarms.append({
+                                                    "device": "Inversor",
+                                                    "name": alarm_name,
+                                                    "level": severity,
+                                                    "time": alarm_time_str,
+                                                    "emoji": level_emoji
+                                                })
+                                                _LOGGER.warning(f"🚨 Active alarm in {plant_name} - Inversor: {alarm_name} (Severity {severity}) at {alarm_time_str}")
+                                                print(f"    🚨 {plant_name}: {alarm_name} (Severidade {severity}) - {alarm_time_str}")
+                                        continue
+                                    except Exception as retry_dev_error:
+                                        retry_msg = str(retry_dev_error)
+                                        retry_type = type(retry_dev_error).__name__
+                                        _LOGGER.warning(f"API error getting alarms for inverter {inverter_id} in {plant_name} after retry: {retry_type} - {retry_msg}")
+                                        continue
                                 except Exception as alarm_error:
                                     error_msg = str(alarm_error)
                                     error_type = type(alarm_error).__name__
                                     _LOGGER.warning(f"Failed to get alarms for inverter {inverter_id} in {plant_name}: {error_type} - {error_msg}", exc_info=True)
-                                    continue
+                                    # Retry once after 10 seconds for generic exceptions too
+                                    time.sleep(10)
+                                    try:
+                                        _LOGGER.info(f"Retrying get_alarm_data for inverter {inverter_id} in {plant_name} after generic error...")
+                                        alarm_data = client.get_alarm_data(device_dn=inverter_id)
+                                        _LOGGER.info(f"get_alarm_data (retry) returned for {plant_name}: {type(alarm_data)}, keys: {list(alarm_data.keys()) if isinstance(alarm_data, dict) else 'N/A'}")
+                                        # Re-run parsing logic on retry
+                                        alarms = []
+                                        if isinstance(alarm_data, dict):
+                                            if alarm_data.get("success") and "data" in alarm_data:
+                                                level1_data = alarm_data["data"]
+                                                if isinstance(level1_data, dict) and level1_data.get("success") and "data" in level1_data:
+                                                    level2_data = level1_data["data"]
+                                                    if isinstance(level2_data, dict) and "hits" in level2_data:
+                                                        alarms = level2_data["hits"]
+                                                        if not isinstance(alarms, list):
+                                                            alarms = []
+                                        _LOGGER.info(f"Parsed {len(alarms)} alarm(s) from retry response for {plant_name}")
+                                        # Process alarms if found (same logic as above)
+                                        if alarms:
+                                            for alarm in alarms:
+                                                if not isinstance(alarm, dict):
+                                                    continue
+                                                alarm_name = alarm.get("alarmName") or "Alarme desconhecido"
+                                                severity = alarm.get("severity") or alarm.get("alarmLevel") or ""
+                                                latest_occur_time = alarm.get("latestOccurTime")
+                                                occur_time_str = alarm.get("occurTimeStr")
+                                                alarm_time_str = "N/A"
+                                                if latest_occur_time:
+                                                    try:
+                                                        alarm_dt = datetime.fromtimestamp(latest_occur_time / 1000)
+                                                        alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                                    except Exception:
+                                                        alarm_time_str = str(latest_occur_time)
+                                                elif occur_time_str:
+                                                    try:
+                                                        alarm_dt = datetime.strptime(occur_time_str, "%Y-%m-%d %H:%M:%S")
+                                                        alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                                    except Exception:
+                                                        alarm_time_str = str(occur_time_str)
+                                                level_emoji = {
+                                                    "1": "🔴", "2": "🟠", "3": "🟡", "4": "⚪",
+                                                    "critical": "🔴", "major": "🟠", "minor": "🟡", "warning": "⚪"
+                                                }.get(str(severity).lower(), "⚠️")
+                                                active_alarms.append({
+                                                    "device": "Inversor",
+                                                    "name": alarm_name,
+                                                    "level": severity,
+                                                    "time": alarm_time_str,
+                                                    "emoji": level_emoji
+                                                })
+                                                _LOGGER.warning(f"🚨 Active alarm in {plant_name} - Inversor: {alarm_name} (Severity {severity}) at {alarm_time_str}")
+                                                print(f"    🚨 {plant_name}: {alarm_name} (Severidade {severity}) - {alarm_time_str}")
+                                        continue
+                                    except Exception as retry_generic_error:
+                                        retry_msg = str(retry_generic_error)
+                                        retry_type = type(retry_generic_error).__name__
+                                        _LOGGER.warning(f"API error getting alarms for inverter {inverter_id} in {plant_name} after retry: {retry_type} - {retry_msg}")
+                                        continue
                         
                         if active_alarms:
                             _LOGGER.info(f"Found {len(active_alarms)} active alarm(s) in {plant_name}")
@@ -1454,6 +1688,59 @@ def process_account(account):
                             )
                         else:
                             result["alerts"].append(disconnected_alert_msg)
+            # If plant is disconnected and we have active alarms, override display to reflect alarm state:
+            # - Use alarm emoji as status_icon
+            # - Use alarm timestamp as last_data_time
+            # - Force metrics to 0/-- in the table
+            if plant['plantStatus'] == 'disconnected' and active_alarms:
+                # Prefer installation-level alarms; fallback to any alarm
+                installation_alarms = [a for a in active_alarms if a.get("device") == "Instalação"]
+                candidate_alarms = installation_alarms or active_alarms
+
+                def alarm_severity_rank(a):
+                    sev = str(a.get("level", "")).lower()
+                    mapping = {
+                        "1": 0, "critical": 0,
+                        "2": 1, "major": 1,
+                        "3": 2, "minor": 2,
+                        "4": 3, "warning": 3,
+                    }
+                    return mapping.get(sev, 4)
+
+                main_alarm = sorted(candidate_alarms, key=alarm_severity_rank)[0]
+
+                # Override status icon with alarm emoji
+                status_icon = main_alarm.get("emoji", status_icon)
+
+                # Override last_data_time with alarm raw time if available (API format YYYY-MM-DD HH:MM:SS)
+                alarm_raw_time = main_alarm.get("raw_time")
+                alarm_display_time = main_alarm.get("time")
+                if alarm_raw_time:
+                    # Strip seconds to keep consistent with other timestamps (YYYY-MM-DD HH:MM)
+                    try:
+                        dt = datetime.strptime(alarm_raw_time, "%Y-%m-%d %H:%M:%S")
+                        last_data_time = dt.strftime("%Y-%m-%d %H:%M")
+                    except Exception:
+                        last_data_time = alarm_raw_time
+                elif alarm_display_time:
+                    # alarm_display_time está em formato PT (DD/MM/YYYY HH:MM)
+                    try:
+                        dt = datetime.strptime(alarm_display_time, "%d/%m/%Y %H:%M")
+                        last_data_time = dt.strftime("%Y-%m-%d %H:%M")
+                    except Exception:
+                        last_data_time = alarm_display_time
+
+                # Forçar métricas a zero para indicar que não há dados válidos atuais
+                # Ajustar os totais removendo os valores originais e adicionando zero
+                result["production"] = result["production"] - original_production + 0.0
+                result["consumption"] = result["consumption"] - original_consumption + 0.0
+                result["grid"] = result["grid"] - original_grid + 0.0
+                
+                production_power = 0.0
+                consumption_power = 0.0
+                grid_power = 0.0
+                surplus_power = 0.0
+
             else:
                 # Plant is connected, skip alarm check to reduce API calls
                 _LOGGER.debug(f"Skipping alarm check for {plant_name} - plant is connected")
@@ -1481,6 +1768,7 @@ def process_account(account):
                 result["summed_consumption"] = [0] * len(consumption_power_filtered)
                 result["summed_self_consumption"] = [0] * len(self_use_power_filtered)
                 result["summed_overflow"] = [0] * len(product_power_filtered)
+                result["summed_grid"] = [0] * len(product_power_filtered)  # NOVO
 
             result["summed_production"] = [
                 round(s + c, 2) for s, c in zip(result["summed_production"], product_power_filtered)
@@ -1494,6 +1782,11 @@ def process_account(account):
             result["summed_overflow"] = [
                 round(s + max(prod - cons, 0), 2)
                 for s, prod, cons in zip(result["summed_overflow"], product_power_filtered, consumption_power_filtered)
+            ]
+            # NOVO: Consumo da Rede = parte do consumo que vem da rede (quando consumo > produção)
+            result["summed_grid"] = [
+                round(s + max(cons - prod, 0), 2)
+                for s, prod, cons in zip(result["summed_grid"], product_power_filtered, consumption_power_filtered)
             ]
 
         # Don't log out - keep session alive for reuse
@@ -1526,6 +1819,7 @@ def _fetch_live_data():
         statuses = []
         zero_production_plants = []
         summed_production = summed_consumption = summed_self_consumption = summed_overflow = None
+        summed_grid = None  # NOVO
         account_summaries = []  # Track stations per account
 
         with ThreadPoolExecutor(max_workers=5) as executor:
@@ -1551,11 +1845,17 @@ def _fetch_live_data():
                         summed_consumption = r["summed_consumption"]
                         summed_self_consumption = r["summed_self_consumption"]
                         summed_overflow = r["summed_overflow"]
+                        summed_grid = r.get("summed_grid")  # NOVO
                     else:
                         summed_production = [a + b for a, b in zip(summed_production, r["summed_production"])]
                         summed_consumption = [a + b for a, b in zip(summed_consumption, r["summed_consumption"])]
                         summed_self_consumption = [a + b for a, b in zip(summed_self_consumption, r["summed_self_consumption"])]
                         summed_overflow = [a + b for a, b in zip(summed_overflow, r["summed_overflow"])]
+                        # NOVO: combinar summed_grid
+                        if summed_grid is not None and r.get("summed_grid") is not None:
+                            summed_grid = [a + b for a, b in zip(summed_grid, r["summed_grid"])]
+                        elif summed_grid is None and r.get("summed_grid") is not None:
+                            summed_grid = r["summed_grid"]
 
         # Print summary of installations per account
         _LOGGER.info("="*60)
@@ -1609,12 +1909,14 @@ def _fetch_live_data():
             summed_consumption = summed_consumption[:n]
             summed_self_consumption = summed_self_consumption[:n]
             summed_overflow = summed_overflow[:n]
+            summed_grid = summed_grid[:n] if summed_grid is not None else []  # NOVO
         else:
             # If no chart data available, use empty arrays
             summed_production = []
             summed_consumption = []
             summed_self_consumption = []
             summed_overflow = []
+            summed_grid = []  # NOVO
 
         # Get current timestamp for last updated
         last_updated_datetime = datetime.now()
@@ -1629,7 +1931,8 @@ def _fetch_live_data():
             "chart": {
                 "x_axis": filtered_axis,
                 "production": summed_production,
-                "consumption": summed_consumption,
+                "grid_consumption": summed_grid,          # NOVO: Consumo da Rede (gráfico)
+                "consumption": summed_consumption,        # Consumo Total
                 "self_consumption": summed_self_consumption,
                 "surplus": summed_overflow
             },
@@ -1673,7 +1976,7 @@ def _update_chart_x_axis_for_current_time(cached_data):
     chart["x_axis"] = filtered_axis
     
     # Pad all data arrays with null values for new time points
-    arrays_to_pad = ["production", "consumption", "self_consumption", "surplus"]
+    arrays_to_pad = ["production", "grid_consumption", "consumption", "self_consumption", "surplus"]
     for array_name in arrays_to_pad:
         if array_name in chart and isinstance(chart[array_name], list):
             # Add null values for new time points

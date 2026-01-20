@@ -236,15 +236,15 @@ header > div:last-child {
   box-shadow: 0 6px 15px rgba(0,0,0,0.4);
 }
 
-/* Color accents for different card types */
+/* Color accents for different card types (aligned with chart/table palette) */
 #prod {
-  border-left: 4px solid #4CAF50; /* Green for production */
+  border-left: 4px solid #FFB300; /* Produção */
 }
 #cons {
-  border-left: 4px solid #FF9800; /* Orange for consumption */
+  border-left: 4px solid #42A5F5; /* Consumo Total */
 }
 #grid {
-  border-left: 4px solid #2196F3; /* Blue for grid */
+  border-left: 4px solid #EF5350; /* Consumo da Rede */
 }
 #plants {
   border-left: 4px solid #9C27B0; /* Purple for plants count */
@@ -432,24 +432,24 @@ td {
   font-style: italic;
 }
 
-/* Production values - subtle green tint */
+/* Production values - subtle tint aligned with #FFB300 */
 .prod-value {
-  color: #81C784;
+  color: #FFB300;
 }
 
-/* Consumption values - subtle orange tint */
+/* Total consumption values - subtle tint aligned with #42A5F5 */
 .cons-value {
-  color: #FFB74D;
+  color: #42A5F5;
 }
 
-/* Grid consumption - subtle blue tint */
+/* Grid consumption - subtle tint aligned with #EF5350 */
 .grid-value {
-  color: #64B5F6;
+  color: #EF5350;
 }
 
-/* Surplus values - subtle green tint */
+/* Surplus values - subtle teal tint aligned with #26A69A */
 .surplus-value {
-  color: #4CAF50;
+  color: #26A69A;
   font-weight: 600;
 }
 

@@ -5,10 +5,11 @@ const energyChart = new Chart(ctx, {
   data: {
     labels: generateFullDayXAxis(),
     datasets: [
-      { label: 'Produção', data: [], borderColor: 'orange', fill: false, tension: 0.2 },
-      { label: 'Consumo', data: [], borderColor: '#3898FE', fill: false, tension: 0.2 },
-      { label: 'Autoconsumo', data: [], borderColor: 'red', fill: false, tension: 0.2 },
-      { label: 'Excedente', data: [], borderColor: '#18CF87', fill: false, tension: 0.2 }
+      { label: 'Produção (kW)',         data: [], borderColor: '#FFB300',  fill: false, tension: 0.2 },
+      { label: 'Consumo Total (kW)',    data: [], borderColor: '#42A5F5',  fill: false, tension: 0.2 },
+      { label: 'Consumo da Rede (kW)',  data: [], borderColor: '#EF5350',  fill: false, tension: 0.2 },
+      { label: 'Excedente (kW)',        data: [], borderColor: '#26A69A',  fill: false, tension: 0.2 },
+      { label: 'Autoconsumo (kW)',      data: [], borderColor: '#66BB6A',  fill: false, tension: 0.2 }
     ]
   },
   options: {
@@ -328,17 +329,19 @@ async function fetchLiveData() {
         }
       }
       
-      // If status is critical (🔴), show only name, status and timestamp
+      // If status is critical (🔴) or plant has active alarms, show simplified view
       const isCritical = plant.status_icon === "🔴";
+      const hasActiveAlarms = plant.active_alarms && plant.active_alarms.length > 0;
       
-      if (isCritical) {
+      if (isCritical || hasActiveAlarms) {
+        // For plants with alarms, show 0.00 for all metrics (not --)
         row.innerHTML = `
           <td><strong>${plant.name}</strong></td>
-          <td>--</td>
-          <td>--</td>
-          <td>--</td>
-          <td>--</td>
-          <td>--</td>
+          <td>${plant.pinstalled ? plant.pinstalled.toFixed(2) : "--"}</td>
+          <td><span class="zero-value">0.00</span></td>
+          <td><span class="zero-value">0.00</span></td>
+          <td><span class="zero-value">0.00</span></td>
+          <td><span class="zero-value">--</span></td>
           <td style="font-size: 0.9em; color: #aaa;">${timestampDisplay}</td>
           <td style="font-size: 1.2em;">${plant.status_icon}</td>
         `;
@@ -347,8 +350,8 @@ async function fetchLiveData() {
           <td><strong>${plant.name}</strong></td>
           <td>${plant.pinstalled ? plant.pinstalled.toFixed(2) : "--"}</td>
           <td>${formatValue(plant.production, "prod-value")}</td>
-          <td>${formatValue(gridConsumption, "grid-value", false)}</td>
           <td>${formatValue(plant.consumption, "cons-value")}</td>
+          <td>${formatValue(gridConsumption, "grid-value", false)}</td>
           <td>${formatValue(plant.surplus, "surplus-value", false)}</td>
           <td style="font-size: 0.9em; color: #aaa;">${timestampDisplay}</td>
           <td style="font-size: 1.2em;">${plant.status_icon}</td>
@@ -383,40 +386,46 @@ async function fetchLiveData() {
 	
 	if (data.chart && 
 	    data.chart.production && 
+	    data.chart.grid_consumption &&        // NOVO
 	    data.chart.consumption && 
 	    data.chart.self_consumption && 
 	    data.chart.surplus &&
 	    Array.isArray(data.chart.production) &&
+	    Array.isArray(data.chart.grid_consumption) &&  // NOVO
 	    Array.isArray(data.chart.consumption) &&
 	    Array.isArray(data.chart.self_consumption) &&
 	    Array.isArray(data.chart.surplus)) {
 	  const fullLabels = generateFullDayXAxis();
 	  const currentLength = data.chart.x_axis ? data.chart.x_axis.length : 0;
-	
+
 	// Use all available data points (backend handles time filtering)
-	  const trimmedProduction = data.chart.production.slice(0, currentLength);
-	  const trimmedConsumption = data.chart.consumption.slice(0, currentLength);
+	  const trimmedProduction      = data.chart.production.slice(0, currentLength);
+	  const trimmedGridConsumption = data.chart.grid_consumption.slice(0, currentLength);  // NOVO
+	  const trimmedConsumption     = data.chart.consumption.slice(0, currentLength);
 	  const trimmedSelfConsumption = data.chart.self_consumption.slice(0, currentLength);
-	  const trimmedSurplus = data.chart.surplus.slice(0, currentLength);
-	
+	  const trimmedSurplus         = data.chart.surplus.slice(0, currentLength);
+
 	  // Fill missing future points with null
-	  const paddedProduction = [...trimmedProduction];
-	  const paddedConsumption = [...trimmedConsumption];
+	  const paddedProduction      = [...trimmedProduction];
+	  const paddedGridConsumption = [...trimmedGridConsumption];  // NOVO
+	  const paddedConsumption     = [...trimmedConsumption];
 	  const paddedSelfConsumption = [...trimmedSelfConsumption];
-	  const paddedSurplus = [...trimmedSurplus];
+	  const paddedSurplus         = [...trimmedSurplus];
 
 	  while (paddedProduction.length < fullLabels.length) {
 		paddedProduction.push(null);
+		paddedGridConsumption.push(null);  // NOVO
 		paddedConsumption.push(null);
 		paddedSelfConsumption.push(null);
 		paddedSurplus.push(null);
 	  }
 
 	  energyChart.data.labels = fullLabels;
-	  energyChart.data.datasets[0].data = paddedProduction;
-	  energyChart.data.datasets[1].data = paddedConsumption;
-	  energyChart.data.datasets[2].data = paddedSelfConsumption;
-	  energyChart.data.datasets[3].data = paddedSurplus;
+	  energyChart.data.datasets[0].data = paddedProduction;       // Produção
+	  energyChart.data.datasets[1].data = paddedConsumption;      // Consumo Total
+	  energyChart.data.datasets[2].data = paddedGridConsumption;  // Consumo da Rede
+	  energyChart.data.datasets[3].data = paddedSurplus;          // Excedente
+	  energyChart.data.datasets[4].data = paddedSelfConsumption;  // Autoconsumo
 	  energyChart.update();
 	}
 	
