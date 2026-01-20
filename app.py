@@ -6,16 +6,28 @@ if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
-from flask import Flask, render_template, jsonify, send_from_directory
+from flask import Flask, render_template, jsonify, send_from_directory, request
 import time
 import logging
 from logging.handlers import RotatingFileHandler
 import os
 from datetime import datetime
+import copy
 from fusion_solar_py.client import FusionSolarClient
 from fusion_solar_py.exceptions import FusionSolarException
+from requests.exceptions import HTTPError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+
+# Try to import python-dotenv for .env file support
+try:
+    from dotenv import load_dotenv
+    DOTENV_AVAILABLE = True
+except ImportError:
+    DOTENV_AVAILABLE = False
+    _LOGGER = logging.getLogger(__name__)
+    _LOGGER.warning("python-dotenv not installed. Install with: pip install python-dotenv")
+    _LOGGER.warning("Continuing without .env file support, using hardcoded credentials...")
 
 # Configure logging with timestamps and detailed formatting
 # Create logs directory if it doesn't exist
@@ -104,6 +116,10 @@ is_production = os.environ.get('FLASK_ENV') == 'production' or os.environ.get('E
 
 app = Flask(__name__)
 
+# Disable caching for static files in development
+# This ensures browser always gets latest version of JS/CSS files
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+
 # Set debug mode based on environment
 # In production with gunicorn, debug should be False for security
 if is_production:
@@ -114,6 +130,19 @@ else:
     # Development mode - can use debug=True when running directly
     app.config['DEBUG'] = True
     _LOGGER.info("Running in DEVELOPMENT mode (debug=True)")
+
+# Add cache-busting headers for static files in debug mode
+# NOTE: This must be after debug mode is configured (line 140) to work correctly
+if app.debug:
+    # In debug mode, add cache-busting headers
+    @app.after_request
+    def add_no_cache_headers(response):
+        if request.endpoint and 'static' in request.endpoint:
+            response.cache_control.no_store = True
+            response.cache_control.no_cache = True
+            response.cache_control.must_revalidate = True
+            response.cache_control.max_age = 0
+        return response
 
 # Hybrid approach: Session pool + Data cache (optimized for Raspberry Pi)
 # Session pool maintains persistent connections to reduce logins
@@ -130,18 +159,89 @@ _data_cache = {
 }
 CACHE_DURATION = 5 * 60  # 5 minutes in seconds
 
+# Disconnected plant threshold: change to red if disconnected for more than X hours
+DISCONNECTED_RED_THRESHOLD_HOURS = 8  # Hours
+
 # CAPTCHA Configuration
 # Path to the captcha model file (relative to app.py location)
 CAPTCHA_MODEL_PATH = os.path.join("models", "captcha_huawei.onnx")
 
-#Configuration
-accounts = [
+# Default accounts (fallback if .env is not available or not configured)
+DEFAULT_ACCOUNTS = [
     ("DomusSocial", "UpacsDM@2023FNT", "uni004eu5"),  # Porto Solar
     ("AEdP_EDS", "AEdP@2024", "uni003eu5"),  # Parque da Trindade
     ("UPAC_AMIAL", "amial2023", "uni003eu5"),  # Agra do Amial
     ("Adeporto", "Tribunal-2030", "uni001eu5"),  # Tribunal
     ("mapadeporto", "info-2030", "uni005eu5"), # MAP funcional
 ]
+
+# Load environment variables from .env file if available
+if DOTENV_AVAILABLE:
+    load_dotenv()
+
+def load_accounts_from_env():
+    """
+    Load multiple accounts from .env file.
+    
+    Expected format in .env:
+    ACCOUNT_1_USER=username1
+    ACCOUNT_1_PASSWORD=password1
+    ACCOUNT_1_SUBDOMAIN=subdomain1
+    ACCOUNT_2_USER=username2
+    ACCOUNT_2_PASSWORD=password2
+    ACCOUNT_2_SUBDOMAIN=subdomain2
+    ...
+    
+    Returns list of tuples: [(USER, PASSWORD, SUBDOMAIN), ...]
+    Compatible with existing get_or_create_client() function.
+    """
+    accounts = []
+    
+    if not DOTENV_AVAILABLE:
+        # If dotenv is not available, return default accounts
+        _LOGGER = logging.getLogger(__name__)
+        _LOGGER.info("Using default hardcoded accounts (python-dotenv not available)")
+        return DEFAULT_ACCOUNTS
+    
+    # Search for numbered accounts (ACCOUNT_1_*, ACCOUNT_2_*, etc.)
+    account_num = 1
+    while True:
+        user_key = f"ACCOUNT_{account_num}_USER"
+        password_key = f"ACCOUNT_{account_num}_PASSWORD"
+        subdomain_key = f"ACCOUNT_{account_num}_SUBDOMAIN"
+        
+        user = os.getenv(user_key)
+        password = os.getenv(password_key)
+        subdomain = os.getenv(subdomain_key)
+        
+        # If we don't find at least one of the variables, stop
+        if not (user and password and subdomain):
+            break
+        
+        accounts.append((user, password, subdomain))
+        account_num += 1
+    
+    # If no numbered accounts found, try unnumbered variables (backwards compatibility)
+    if not accounts:
+        user = os.getenv("ACCOUNT_USER")
+        password = os.getenv("ACCOUNT_PASSWORD")
+        subdomain = os.getenv("ACCOUNT_SUBDOMAIN")
+        
+        if user and password and subdomain:
+            accounts.append((user, password, subdomain))
+    
+    # If no accounts found in .env, use defaults
+    if not accounts:
+        _LOGGER = logging.getLogger(__name__)
+        _LOGGER.info("No accounts found in .env file, using default hardcoded accounts")
+        return DEFAULT_ACCOUNTS
+    
+    _LOGGER = logging.getLogger(__name__)
+    _LOGGER.info(f"Loaded {len(accounts)} account(s) from .env file")
+    return accounts
+
+# Load accounts from .env or use defaults
+accounts = load_accounts_from_env()
 
 def custom_get_station_list(self) -> list:
     """Get all stations with pagination support"""
@@ -234,7 +334,7 @@ list_of_plants = [
     ("Escola Básica Miosótis", "0"),
     ("Escola Básica Augusto Lessa", "0"),
     ("Escola Básica Bom Pastor", "0"),
-    ("Escola Básica Costa Cabral", "1"),
+    ("Escola Básica Costa Cabral", "0"),
     ("Escola Básica Bom Sucesso", "0"),
     ("Escola Básica São Tomé", "0"),
     ("Escola Básica do Falcão", "0"),    
@@ -259,9 +359,9 @@ list_of_plants = [
     ("Bloco A -N142", "0"),
     ("Bloco A -N138", "0"),
     ("Bloco A - N134", "0"),
-    ("Escola EB1 Agra do Amial", "1"),
+    ("Escola EB1 Agra do Amial", "0"),
     ("TRP", "0"),
-    ("TRP Museu", "1"),
+    ("TRP Museu", "0"),
     ("TRP Elevadores", "0"),
     ("MAP UPAC 2", "0"),
     ("MAP UPAC 1", "0"),    
@@ -501,12 +601,126 @@ def get_plant_stats(
     # return the plant data
     return plant_data["data"]
 
+def get_inverter_ids(self, plant_id: str) -> list:
+    """Get inverter device IDs for a specific plant
+    :param plant_id: The plant's id
+    :type plant_id: str
+    :return: List of inverter device IDs (deviceDn)
+    :rtype: list
+    """
+    inverter_ids = []
+    try:
+        # Method 1: Try using plant flow to get device IDs
+        # Check if get_plant_flow method exists
+        if not hasattr(self, 'get_plant_flow'):
+            _LOGGER.warning(f"get_plant_flow method not found on client, trying alternative method")
+            raise AttributeError("get_plant_flow method not available")
+        
+        _LOGGER.debug(f"Calling get_plant_flow for plant {plant_id}")
+        plant_flow = self.get_plant_flow(plant_id)
+        _LOGGER.debug(f"get_plant_flow returned: {type(plant_flow)}")
+        
+        if not plant_flow or not isinstance(plant_flow, dict):
+            _LOGGER.warning(f"get_plant_flow returned invalid data for plant {plant_id}")
+            raise ValueError("Invalid plant flow data")
+        
+        nodes = plant_flow.get('data', {}).get('flow', {}).get('nodes', [])
+        _LOGGER.debug(f"Found {len(nodes)} nodes in plant flow for {plant_id}")
+        
+        for node in nodes:
+            # Look for inverter nodes - check name, type, and other fields
+            node_name = node.get('name', '').lower()
+            node_type = node.get('type', '').lower()
+            node_id = node.get('id', '').lower()
+            
+            # Check if this is an inverter node
+            # Check each text field against each keyword
+            if any(keyword in text for text in [node_name, node_type, node_id] 
+                   for keyword in ['inverter', 'inv']):
+                # Get device IDs from this node
+                dev_ids = node.get('devIds', [])
+                if dev_ids:
+                    # Filter out None values before extending
+                    valid_dev_ids = [dev_id for dev_id in dev_ids if dev_id]
+                    if valid_dev_ids:
+                        inverter_ids.extend(valid_dev_ids)
+                        _LOGGER.debug(f"Found inverter node: {node_name or node_type or node_id}, devIds: {valid_dev_ids}")
+                    else:
+                        _LOGGER.warning(f"Inverter node found but all devIds are None or empty: {node_name or node_type or node_id}")
+        
+        # If no inverters found via plant flow, try alternative method
+        if not inverter_ids:
+            _LOGGER.info(f"No inverters found via plant flow for {plant_id}, trying alternative method")
+            # Method 2: Try using get_device_ids and filter (less precise but may work)
+            try:
+                if not hasattr(self, 'get_device_ids'):
+                    _LOGGER.warning(f"get_device_ids method not found on client")
+                    raise AttributeError("get_device_ids method not available")
+                
+                all_devices = self.get_device_ids()
+                _LOGGER.debug(f"get_device_ids returned {len(all_devices)} devices")
+                # Filter for inverters - note: this gets all inverters in account, not just this plant
+                # But it's a fallback if plant_flow doesn't work
+                for device in all_devices:
+                    if device.get('type', '').lower() == 'inverter':
+                        device_dn = device.get('deviceDn')
+                        # Only add if deviceDn exists and is not None
+                        if device_dn:
+                            inverter_ids.append(device_dn)
+                            _LOGGER.debug(f"Found inverter device: {device}")
+                        else:
+                            _LOGGER.warning(f"Inverter device found but deviceDn is missing or None: {device}")
+            except Exception as e2:
+                _LOGGER.warning(f"Alternative method also failed for plant {plant_id}: {e2}", exc_info=True)
+        
+        if inverter_ids:
+            _LOGGER.info(f"Found {len(inverter_ids)} inverter(s) for plant {plant_id}: {inverter_ids}")
+        else:
+            _LOGGER.info(f"No inverters found for plant {plant_id}")
+        
+        return inverter_ids
+    except AttributeError as e:
+        _LOGGER.error(f"Method not available when getting inverter IDs for plant {plant_id}: {e}", exc_info=True)
+        return []
+    except Exception as e:
+        _LOGGER.warning(f"Failed to get inverter IDs for plant {plant_id}: {e}", exc_info=True)
+        return []
+
+def get_plant_alarm_data(self, plant_id: str) -> dict:
+    """Retrieves alarm data for a specific plant
+    :param plant_id: The plant's id (stationDn)
+    :type plant_id: str
+    :return: Alarm data for the plant
+    :rtype: dict
+    """
+    url = f"https://{self._huawei_subdomain}.fusionsolar.huawei.com/rest/pvms/fm/v1/query"
+    request_data = {
+        "dataType": "CURRENT",
+        "domainType": "OC_SOLAR",
+        "pageNo": 1,
+        "pageSize": 100,
+        "nativeMeDn": plant_id  # Use plant_id instead of device_dn
+    }
+    _LOGGER.debug(f"get_plant_alarm_data: Calling API with plant_id={plant_id}, request_data={request_data}")
+    r = self._session.post(url=url, json=request_data)
+    r.raise_for_status()
+    response = r.json()
+    _LOGGER.debug(f"get_plant_alarm_data: API returned response type={type(response)}, keys={list(response.keys()) if isinstance(response, dict) else 'N/A'}")
+    if isinstance(response, dict) and "data" in response:
+        _LOGGER.debug(f"get_plant_alarm_data: response['data'] type={type(response['data'])}, keys={list(response['data'].keys()) if isinstance(response['data'], dict) else 'N/A'}")
+    return response
+
 # Monkey-patch additional methods to FusionSolarClient
 FusionSolarClient.get_current_plant_data = get_current_plant_data
 FusionSolarClient.get_plant_stats_yearly = get_plant_stats_yearly
 FusionSolarClient.get_plant_stats_monthly = get_plant_stats_monthly
 FusionSolarClient.get_power_status = get_power_status
 FusionSolarClient.get_plant_stats = get_plant_stats
+FusionSolarClient.get_inverter_ids = get_inverter_ids
+FusionSolarClient.get_plant_alarm_data = get_plant_alarm_data
+
+# Note: get_alarm_data() already exists in fusion_solar_py library, no monkey-patch needed
+# The method is available at: FusionSolarClient.get_alarm_data(device_dn)
 
 error_messages = {
             1: "Instalação Desligada",
@@ -544,29 +758,73 @@ def get_or_create_client(account):
             try:
                 _LOGGER.info(f"[SESSION] Creating NEW session for account: {USER} (subdomain: {SUBDOMAIN})")
                 print(f"🔑 Creating session for {USER}...")
+                
+                # Log account details (without password for security)
+                _LOGGER.debug(f"[SESSION] Account details - USER: '{USER}', SUBDOMAIN: '{SUBDOMAIN}', PASSWORD length: {len(PASSWORD)}")
+                _LOGGER.debug(f"[SESSION] USER type: {type(USER)}, SUBDOMAIN type: {type(SUBDOMAIN)}, PASSWORD type: {type(PASSWORD)}")
+                _LOGGER.debug(f"[SESSION] USER repr: {repr(USER)}, SUBDOMAIN repr: {repr(SUBDOMAIN)}")
+                
                 # Initialize client with captcha support if model path is provided
                 client_kwargs = {"huawei_subdomain": SUBDOMAIN}
-                if CAPTCHA_MODEL_PATH and os.path.exists(CAPTCHA_MODEL_PATH):
-                    client_kwargs["captcha_model_path"] = CAPTCHA_MODEL_PATH
-                    _LOGGER.info(f"CAPTCHA support enabled - using model: {CAPTCHA_MODEL_PATH}")
-                    print(f"Using CAPTCHA model: {CAPTCHA_MODEL_PATH}")
-                elif CAPTCHA_MODEL_PATH:
-                    _LOGGER.warning(f"CAPTCHA model path specified but file not found: {CAPTCHA_MODEL_PATH}")
-                    print(f"⚠️  Warning: CAPTCHA model not found at {CAPTCHA_MODEL_PATH}")
+                _LOGGER.debug(f"[SESSION] Initial client_kwargs: {client_kwargs}")
                 
+                if CAPTCHA_MODEL_PATH:
+                    _LOGGER.debug(f"[SESSION] CAPTCHA_MODEL_PATH: '{CAPTCHA_MODEL_PATH}'")
+                    _LOGGER.debug(f"[SESSION] CAPTCHA_MODEL_PATH exists: {os.path.exists(CAPTCHA_MODEL_PATH) if CAPTCHA_MODEL_PATH else False}")
+                    _LOGGER.debug(f"[SESSION] CAPTCHA_MODEL_PATH absolute: {os.path.abspath(CAPTCHA_MODEL_PATH) if CAPTCHA_MODEL_PATH else 'N/A'}")
+                    
+                    if os.path.exists(CAPTCHA_MODEL_PATH):
+                        try:
+                            # Try to get absolute path and verify it's valid
+                            abs_path = os.path.abspath(CAPTCHA_MODEL_PATH)
+                            _LOGGER.debug(f"[SESSION] CAPTCHA model absolute path: '{abs_path}'")
+                            client_kwargs["captcha_model_path"] = abs_path
+                            _LOGGER.info(f"[SESSION] CAPTCHA support enabled - using model: {abs_path}")
+                            print(f"Using CAPTCHA model: {abs_path}")
+                        except Exception as path_error:
+                            _LOGGER.error(f"[SESSION] Error processing CAPTCHA model path '{CAPTCHA_MODEL_PATH}': {path_error}", exc_info=True)
+                            print(f"⚠️  Error with CAPTCHA model path: {path_error}")
+                    else:
+                        _LOGGER.warning(f"[SESSION] CAPTCHA model path specified but file not found: {CAPTCHA_MODEL_PATH}")
+                        print(f"⚠️  Warning: CAPTCHA model not found at {CAPTCHA_MODEL_PATH}")
+                else:
+                    _LOGGER.debug(f"[SESSION] No CAPTCHA_MODEL_PATH configured")
+                
+                _LOGGER.debug(f"[SESSION] Final client_kwargs: {client_kwargs}")
                 _LOGGER.info(f"[SESSION] Attempting login for account: {USER}...")
                 login_start_time = time.time()
                 
                 # Track if CAPTCHA was encountered during login
                 # The fusion_solar_py library will log "solving captcha and retrying login" if CAPTCHA is needed
                 try:
+                    _LOGGER.debug(f"[SESSION] Calling FusionSolarClient with USER='{USER}', PASSWORD length={len(PASSWORD)}, kwargs={client_kwargs}")
+                    _LOGGER.debug(f"[SESSION] About to create FusionSolarClient instance...")
                     client = FusionSolarClient(USER, PASSWORD, **client_kwargs)
+                    _LOGGER.debug(f"[SESSION] FusionSolarClient instance created successfully")
+                except OSError as os_error:
+                    # OSError with errno 22 is "Invalid argument"
+                    error_code = getattr(os_error, 'errno', None)
+                    error_msg = str(os_error)
+                    _LOGGER.error(f"[SESSION] OSError during login for {USER}: errno={error_code}, message='{error_msg}'", exc_info=True)
+                    _LOGGER.error(f"[SESSION] OSError details - USER: '{USER}', SUBDOMAIN: '{SUBDOMAIN}', PASSWORD length: {len(PASSWORD)}")
+                    _LOGGER.error(f"[SESSION] OSError details - client_kwargs: {client_kwargs}")
+                    if CAPTCHA_MODEL_PATH:
+                        _LOGGER.error(f"[SESSION] OSError details - CAPTCHA_MODEL_PATH: '{CAPTCHA_MODEL_PATH}', exists: {os.path.exists(CAPTCHA_MODEL_PATH)}")
+                    print(f"❌ OSError during login for {USER}: errno={error_code}, {error_msg}")
+                    raise
                 except Exception as login_exc:
                     # Check if it's a CAPTCHA-related exception
-                    error_msg = str(login_exc).lower()
-                    if 'captcha' in error_msg:
+                    error_msg = str(login_exc)
+                    error_type = type(login_exc).__name__
+                    _LOGGER.error(f"[SESSION] Exception during login for {USER}: {error_type} - {error_msg}", exc_info=True)
+                    _LOGGER.error(f"[SESSION] Exception details - USER: '{USER}', SUBDOMAIN: '{SUBDOMAIN}', PASSWORD length: {len(PASSWORD)}")
+                    _LOGGER.error(f"[SESSION] Exception details - client_kwargs: {client_kwargs}")
+                    
+                    if 'captcha' in error_msg.lower():
                         _LOGGER.warning(f"[CAPTCHA] ⚠️ CAPTCHA encountered during login for {USER}: {login_exc}")
                         print(f"🔐 [CAPTCHA] Encountered during login for {USER}")
+                    else:
+                        print(f"❌ Exception during login for {USER}: {error_type}: {error_msg}")
                     raise
                 
                 login_duration = time.time() - login_start_time
@@ -586,10 +844,36 @@ def get_or_create_client(account):
                 _LOGGER.error(f"[SESSION] FusionSolar API error during login for {USER}: {error_msg}")
                 print(f"❌ FusionSolar API error for {USER}: {error_msg}")
                 raise
+            except OSError as os_error:
+                # OSError with errno 22 is "Invalid argument" - often related to file paths or encoding
+                error_code = getattr(os_error, 'errno', None)
+                error_msg = str(os_error)
+                filename = getattr(os_error, 'filename', None)
+                _LOGGER.error(f"[SESSION] OSError during login for {USER}: errno={error_code}, message='{error_msg}', filename={filename}", exc_info=True)
+                _LOGGER.error(f"[SESSION] OSError context - USER: '{USER}', SUBDOMAIN: '{SUBDOMAIN}', PASSWORD length: {len(PASSWORD)}")
+                _LOGGER.error(f"[SESSION] OSError context - client_kwargs: {client_kwargs}")
+                if CAPTCHA_MODEL_PATH:
+                    _LOGGER.error(f"[SESSION] OSError context - CAPTCHA_MODEL_PATH: '{CAPTCHA_MODEL_PATH}'")
+                    _LOGGER.error(f"[SESSION] OSError context - CAPTCHA_MODEL_PATH exists: {os.path.exists(CAPTCHA_MODEL_PATH)}")
+                    try:
+                        abs_path = os.path.abspath(CAPTCHA_MODEL_PATH)
+                        _LOGGER.error(f"[SESSION] OSError context - CAPTCHA_MODEL_PATH absolute: '{abs_path}'")
+                    except Exception as path_err:
+                        _LOGGER.error(f"[SESSION] OSError context - Could not get absolute path: {path_err}")
+                print(f"❌ OSError during login for {USER}: errno={error_code}, {error_msg}")
+                if filename:
+                    print(f"   Related file: {filename}")
+                raise
             except Exception as e:
                 error_msg = str(e)
                 error_type = type(e).__name__
+                error_args = getattr(e, 'args', None)
                 _LOGGER.error(f"[SESSION] Failed to create session for {USER} (Error type: {error_type}): {error_msg}", exc_info=True)
+                _LOGGER.error(f"[SESSION] Exception details - USER: '{USER}', SUBDOMAIN: '{SUBDOMAIN}', PASSWORD length: {len(PASSWORD)}")
+                _LOGGER.error(f"[SESSION] Exception details - client_kwargs: {client_kwargs}")
+                _LOGGER.error(f"[SESSION] Exception args: {error_args}")
+                if CAPTCHA_MODEL_PATH:
+                    _LOGGER.error(f"[SESSION] Exception context - CAPTCHA_MODEL_PATH: '{CAPTCHA_MODEL_PATH}', exists: {os.path.exists(CAPTCHA_MODEL_PATH)}")
                 print(f"❌ Erro ao criar sessão para {USER}: {error_type}: {error_msg}")
                 raise
         else:
@@ -650,6 +934,7 @@ def process_account(account):
         "summed_consumption": None,
         "summed_self_consumption": None,
         "summed_overflow": None,
+        "summed_grid": None,  # NOVO: série para Consumo da Rede no gráfico
     }
 
     try:
@@ -687,12 +972,28 @@ def process_account(account):
 
         number_plants = len(plants)
         print(f"Found {number_plants} stations for account {USER}")
-        installed_capacity_map = {p["name"]: float(p["installedCapacity"]) for p in plants}
+        # Build installed capacity map - support both field names (installedCapacity and onlyInverterPower)
+        installed_capacity_map = {}
+        for p in plants:
+            plant_name = p["name"]
+            # Try installedCapacity first, then onlyInverterPower, default to 0
+            capacity = (
+                p.get("installedCapacity") or 
+                p.get("onlyInverterPower") or 
+                0
+            )
+            try:
+                installed_capacity_map[plant_name] = float(capacity)
+            except (ValueError, TypeError):
+                installed_capacity_map[plant_name] = 0.0
 
         for i, plant in enumerate(plants, start=1):
             plant_id = plant['dn']
             plant_name = plant["name"]
             installed_capacity = installed_capacity_map.get(plant_name, 0)
+            # If plant is disconnected we may create a generic "Instalação Desligada" alert,
+            # but we'll only append it after checking alarms, to avoid duplicate alerts.
+            disconnected_alert_msg = None
 
             _LOGGER.debug(f"Processing plant {i}/{number_plants}: {plant_name} (ID: {plant_id})")
             print(f"  → Analyzing installation {i}/{number_plants}: {plant_name}")
@@ -702,49 +1003,89 @@ def process_account(account):
                 _LOGGER.debug(f"Successfully retrieved data for plant: {plant_name}")
             except FusionSolarException as e:
                 error_msg = str(e)
-                _LOGGER.error(f"FusionSolar API error fetching data for {plant_name} (ID: {plant_id}): {error_msg}")
-                print(f"    ❌ API error for {plant_name}: {error_msg}")
-                # Continue with next plant even if this one fails
-                result["statuses"].append({
-                    "name": plant_name,
-                    "pinstalled": installed_capacity,
-                    "production": 0.0,
-                    "consumption": 0.0,
-                    "grid": 0.0,
-                    "surplus": 0.0,
-                    "status_icon": "🔴"
-                })
-                # Add detailed error message (truncated if too long)
-                error_display = error_msg[:80] + "..." if len(error_msg) > 80 else error_msg
-                result["alerts"].append(f"🔴 {plant_name} - Erro ao buscar dados: {error_display}")
-                continue
+                _LOGGER.warning(f"FusionSolar API error fetching data for {plant_name} (ID: {plant_id}) on first attempt: {error_msg}")
+                print(f"    ⚠️  API error for {plant_name} (1ª tentativa): {error_msg}")
+                # Retry after 10 seconds
+                time.sleep(10)
+                try:
+                    _LOGGER.info(f"Retrying get_plant_stats/get_last_plant_data for {plant_name} after error...")
+                    plant_stats = client.get_plant_stats(plant_id)
+                    plant_data = client.get_last_plant_data(plant_stats)
+                    _LOGGER.debug(f"Successfully retrieved data for plant on retry: {plant_name}")
+                except FusionSolarException as e_retry:
+                    retry_msg = str(e_retry)
+                    _LOGGER.error(f"FusionSolar API error fetching data for {plant_name} (ID: {plant_id}) after retry: {retry_msg}")
+                    print(f"    ❌ API error for {plant_name} após retry: {retry_msg}")
+                    # Continue with next plant even if this one fails
+                    result["statuses"].append({
+                        "name": plant_name,
+                        "pinstalled": installed_capacity,
+                        "production": 0.0,
+                        "consumption": 0.0,
+                        "grid": 0.0,
+                        "surplus": 0.0,
+                        "status_icon": "🔴"
+                    })
+                    # Add detailed error message (truncated if too long)
+                    error_display = retry_msg[:80] + "..." if len(retry_msg) > 80 else retry_msg
+                    result["alerts"].append(f"🔴 {plant_name} - Erro ao buscar dados: {error_display}")
+                    continue
             except Exception as e:
                 error_msg = str(e)
                 error_type = type(e).__name__
-                _LOGGER.error(f"Error fetching data for plant {plant_name} (ID: {plant_id}): {error_type} - {error_msg}", exc_info=True)
-                print(f"    ❌ Erro ao buscar dados da instalação {plant_name}: {error_type}: {error_msg}")
-                # Continue with next plant even if this one fails
-                result["statuses"].append({
-                    "name": plant_name,
-                    "pinstalled": installed_capacity,
-                    "production": 0.0,
-                    "consumption": 0.0,
-                    "grid": 0.0,
-                    "surplus": 0.0,
-                    "status_icon": "🔴"
-                })
-                # Add detailed error message (truncated if too long)
-                error_display = error_msg[:80] + "..." if len(error_msg) > 80 else error_msg
-                result["alerts"].append(f"🔴 {plant_name} - Erro ao buscar dados: {error_display}")
-                continue
+                _LOGGER.warning(f"Error fetching data for plant {plant_name} (ID: {plant_id}) on first attempt: {error_type} - {error_msg}")
+                print(f"    ⚠️  Erro ao buscar dados da instalação {plant_name} (1ª tentativa): {error_type}: {error_msg}")
+                # Retry after 10 seconds
+                time.sleep(10)
+                try:
+                    _LOGGER.info(f"Retrying get_plant_stats/get_last_plant_data for {plant_name} after generic error...")
+                    plant_stats = client.get_plant_stats(plant_id)
+                    plant_data = client.get_last_plant_data(plant_stats)
+                    _LOGGER.debug(f"Successfully retrieved data for plant on retry: {plant_name}")
+                except Exception as e_retry:
+                    retry_msg = str(e_retry)
+                    retry_type = type(e_retry).__name__
+                    _LOGGER.error(f"Error fetching data for plant {plant_name} (ID: {plant_id}) after retry: {retry_type} - {retry_msg}", exc_info=True)
+                    print(f"    ❌ Erro ao buscar dados da instalação {plant_name} após retry: {retry_type}: {retry_msg}")
+                    # Continue with next plant even if this one fails
+                    result["statuses"].append({
+                        "name": plant_name,
+                        "pinstalled": installed_capacity,
+                        "production": 0.0,
+                        "consumption": 0.0,
+                        "grid": 0.0,
+                        "surplus": 0.0,
+                        "status_icon": "🔴"
+                    })
+                    # Add detailed error message (truncated if too long)
+                    error_display = retry_msg[:80] + "..." if len(retry_msg) > 80 else retry_msg
+                    result["alerts"].append(f"🔴 {plant_name} - Erro ao buscar dados: {error_display}")
+                    continue
 
-            production_power = float(plant_data['productPower']['value'] or 0)
-            consumption_power = float(plant_data['usePower']['value'] or 0)
-            grid_power = float(plant_data['meterActivePower']['value'] or 0)
+            # Extract values and timestamps
+            production_data = plant_data.get('productPower', {})
+            production_power = float(production_data.get('value') or 0) if isinstance(production_data, dict) else float(production_data or 0)
+            production_time = production_data.get('time') if isinstance(production_data, dict) else None
             
-            _LOGGER.debug(f"Plant {plant_name} data - Production: {production_power} kW, Consumption: {consumption_power} kW, Grid: {grid_power} kW")
+            consumption_data = plant_data.get('usePower', {})
+            consumption_power = float(consumption_data.get('value') or 0) if isinstance(consumption_data, dict) else float(consumption_data or 0)
+            consumption_time = consumption_data.get('time') if isinstance(consumption_data, dict) else None
+            
+            grid_data = plant_data.get('meterActivePower', {})
+            grid_power = float(grid_data.get('value') or 0) if isinstance(grid_data, dict) else float(grid_data or 0)
+            grid_time = grid_data.get('time') if isinstance(grid_data, dict) else None
+            
+            # Get the most recent timestamp (or any available timestamp)
+            last_data_time = production_time or consumption_time or grid_time
+            
+            _LOGGER.debug(f"Plant {plant_name} data - Production: {production_power} kW ({production_time}), Consumption: {consumption_power} kW ({consumption_time}), Grid: {grid_power} kW ({grid_time})")
 
-            # totals
+            # Store original values before potential override
+            original_production = production_power
+            original_consumption = consumption_power
+            original_grid = grid_power
+            
+            # totals (will be adjusted later if plant has alarms)
             result["production"] += production_power
             result["consumption"] += consumption_power
             result["grid"] += grid_power
@@ -757,6 +1098,22 @@ def process_account(account):
             elif plant['plantStatus'] == 'disconnected':
                 status_icon = "🟡"
                 error_state = 1
+                
+                # Check if disconnected for more than threshold hours
+                if last_data_time:
+                    try:
+                        # Parse timestamp from "2026-01-15 14:30" format
+                        last_data_datetime = datetime.strptime(last_data_time, "%Y-%m-%d %H:%M")
+                        current_datetime = datetime.now()
+                        hours_disconnected = (current_datetime - last_data_datetime).total_seconds() / 3600
+                        
+                        if hours_disconnected >= DISCONNECTED_RED_THRESHOLD_HOURS:
+                            status_icon = "🔴"
+                            _LOGGER.warning(f"Plant {plant_name} has been disconnected for {hours_disconnected:.1f} hours (threshold: {DISCONNECTED_RED_THRESHOLD_HOURS}h)")
+                    except (ValueError, TypeError) as e:
+                        # If timestamp parsing fails, keep yellow status
+                        _LOGGER.debug(f"Could not parse timestamp for {plant_name}: {last_data_time}, error: {e}")
+                
             elif plant['plantStatus'] == 'connected' and production_power != 0 and consumption_power == 0:
                 status_icon = "🟡"
                 error_state = 2
@@ -770,11 +1127,623 @@ def process_account(account):
             plant_working_map = {name: code for name, code in list_of_plants}
             if error_state != 0:
                 error_message = error_messages.get(error_state, "Erro desconhecido")
-                if plant_working_map.get(plant_name) == "1":
+                # Only override with ⏳ if not already red (🔴)
+                if plant_working_map.get(plant_name) == "1" and status_icon != "🔴":
                     status_icon = "⏳"
-                result["alerts"].append(f"{status_icon} {plant_name} - {error_message}")
+                
+                # Build alert message
+                alert_msg = f"{status_icon} {plant_name} - {error_message}"
+                
+                # Add timestamp for critical alerts (🔴)
+                if status_icon == "🔴" and last_data_time:
+                    try:
+                        # Format timestamp: "2026-01-15 14:30" -> "15/01/2026 14:30"
+                        last_data_datetime = datetime.strptime(last_data_time, "%Y-%m-%d %H:%M")
+                        formatted_time = last_data_datetime.strftime("%d/%m/%Y %H:%M")
+                        alert_msg += f" (última comunicação: {formatted_time})"
+                    except (ValueError, TypeError):
+                        # If parsing fails, use original format
+                        alert_msg += f" (última comunicação: {last_data_time})"
+                
+                # For disconnected plants, defer adding the generic disconnect alert until
+                # after alarm checks (so we can override it with a more specific alarm).
+                if error_state == 1:
+                    disconnected_alert_msg = alert_msg
+                else:
+                    result["alerts"].append(alert_msg)
 
             surplus_power = max(production_power - consumption_power, 0)
+
+            # Check for active alarms ONLY for disconnected plants (to reduce API calls)
+            active_alarms = []
+            if plant['plantStatus'] == 'disconnected':
+                try:
+                    _LOGGER.info(f"🔍 Checking for active alarms in {plant_name} (plant_id: {plant_id}) - plant is disconnected...")
+                    
+                    # First, check for plant-level alarms
+                    try:
+                        _LOGGER.info(f"Calling get_plant_alarm_data for {plant_name} (plant_id: {plant_id})...")
+                        plant_alarm_data = client.get_plant_alarm_data(plant_id)
+                        _LOGGER.info(f"get_plant_alarm_data returned for {plant_name}: {type(plant_alarm_data)}, keys: {list(plant_alarm_data.keys()) if isinstance(plant_alarm_data, dict) else 'N/A'}")
+                        
+                        # Parse plant alarm response - flexible structure handling
+                        # API can return different structures:
+                        # 1. {success: true, data: {hits: [...]}}
+                        # 2. {success: true, data: {success: true, data: {hits: [...]}}}
+                        # 3. Test script wraps: {data: {success: true, data: {success: true, data: {hits: [...]}}}}
+                        plant_alarms = []
+                        if isinstance(plant_alarm_data, dict):
+                            _LOGGER.debug(f"🔍 Parsing plant alarm data structure for {plant_name}...")
+                            _LOGGER.debug(f"   Root level - keys: {list(plant_alarm_data.keys())}, success: {plant_alarm_data.get('success')}")
+                            
+                            # Helper function to recursively find 'hits' key
+                            def find_hits(data, path="root", max_depth=5):
+                                """Recursively search for 'hits' key in nested dict structure"""
+                                if max_depth <= 0:
+                                    return None
+                                
+                                if not isinstance(data, dict):
+                                    return None
+                                
+                                # Check if 'hits' is directly in this level
+                                if "hits" in data:
+                                    hits = data["hits"]
+                                    if isinstance(hits, list):
+                                        _LOGGER.debug(f"   ✅ Found 'hits' at {path}, length: {len(hits)}")
+                                        return hits
+                                
+                                # Recursively search in 'data' key if it exists
+                                if "data" in data:
+                                    nested_data = data["data"]
+                                    if isinstance(nested_data, dict):
+                                        result = find_hits(nested_data, f"{path}.data", max_depth - 1)
+                                        if result is not None:
+                                            return result
+                                
+                                return None
+                            
+                            # Try to find hits recursively
+                            plant_alarms = find_hits(plant_alarm_data) or []
+                            
+                            if not plant_alarms:
+                                # Fallback: try direct access patterns for common structures
+                                # Pattern 1: {success: true, data: {hits: [...]}}
+                                if plant_alarm_data.get("success") and "data" in plant_alarm_data:
+                                    level1 = plant_alarm_data["data"]
+                                    if isinstance(level1, dict) and "hits" in level1:
+                                        plant_alarms = level1["hits"] if isinstance(level1["hits"], list) else []
+                                        _LOGGER.debug(f"   ✅ Found hits using pattern 1 (direct data.hits)")
+                                
+                                # Pattern 2: {success: true, data: {success: true, data: {hits: [...]}}}
+                                if not plant_alarms and plant_alarm_data.get("success") and "data" in plant_alarm_data:
+                                    level1 = plant_alarm_data["data"]
+                                    if isinstance(level1, dict) and level1.get("success") and "data" in level1:
+                                        level2 = level1["data"]
+                                        if isinstance(level2, dict) and "hits" in level2:
+                                            plant_alarms = level2["hits"] if isinstance(level2["hits"], list) else []
+                                            _LOGGER.debug(f"   ✅ Found hits using pattern 2 (nested data.data.hits)")
+                            
+                            if plant_alarms:
+                                _LOGGER.info(f"   ✅ Successfully extracted {len(plant_alarms)} alarm(s) from response")
+                            else:
+                                _LOGGER.warning(f"   ❌ Could not find 'hits' array in response structure")
+                        
+                        _LOGGER.info(f"Parsed {len(plant_alarms)} plant-level alarm(s) from response for {plant_name}")
+                        
+                        # Enhanced logging if no alarms found - this will help debug the structure
+                        # Debug logging only if no alarms found
+                        if len(plant_alarms) == 0 and isinstance(plant_alarm_data, dict):
+                            _LOGGER.debug(f"⚠️ No alarms parsed for {plant_name}. Response structure:")
+                            _LOGGER.debug(f"   Root keys: {list(plant_alarm_data.keys())}")
+                            _LOGGER.debug(f"   Root success: {plant_alarm_data.get('success')}")
+                            
+                            # Check if there's a totalCount indicating alarms exist
+                            def find_total_count(data, path="root", max_depth=5):
+                                """Recursively search for 'totalCount' key"""
+                                if max_depth <= 0:
+                                    return None
+                                if not isinstance(data, dict):
+                                    return None
+                                if "totalCount" in data:
+                                    return data["totalCount"]
+                                if "data" in data and isinstance(data["data"], dict):
+                                    return find_total_count(data["data"], f"{path}.data", max_depth - 1)
+                                return None
+                            
+                            total_count = find_total_count(plant_alarm_data)
+                            if total_count and total_count > 0:
+                                _LOGGER.warning(f"   ⚠️ Response indicates {total_count} alarm(s) exist (totalCount={total_count}) but 'hits' array not found or empty!")
+                                _LOGGER.warning(f"   This may indicate a parsing issue. Full structure:")
+                                import json
+                                _LOGGER.warning(f"   {json.dumps(plant_alarm_data, indent=2, default=str)[:1000]}")  # First 1000 chars
+                        if plant_alarms:
+                            for alarm in plant_alarms:
+                                if not isinstance(alarm, dict):
+                                    continue
+                                
+                                # Extract alarmName (required field from JSON structure)
+                                alarm_name = alarm.get("alarmName") or "Alarme desconhecido"
+                                
+                                # Extract severity (can be number 2 or string "2")
+                                severity = alarm.get("severity")
+                                if severity is None:
+                                    severity = alarm.get("alarmLevel") or ""
+                                
+                                # Extract time - prefer latestOccurTime (timestamp in ms), fallback to occurTimeStr (formatted string)
+                                latest_occur_time = alarm.get("latestOccurTime")
+                                occur_time_str = alarm.get("occurTimeStr")
+                                
+                                # Format alarm time if available
+                                alarm_time_str = "N/A"
+                                if latest_occur_time:
+                                    try:
+                                        # latestOccurTime is timestamp in milliseconds (e.g., 1768764611756)
+                                        if isinstance(latest_occur_time, (int, float)):
+                                            alarm_dt = datetime.fromtimestamp(latest_occur_time / 1000)
+                                            alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                    except Exception as time_error:
+                                        _LOGGER.debug(f"Could not parse latestOccurTime: {latest_occur_time}, error: {time_error}")
+                                        # Fallback to occurTimeStr if available
+                                        if occur_time_str:
+                                            try:
+                                                alarm_dt = datetime.strptime(occur_time_str, "%Y-%m-%d %H:%M:%S")
+                                                alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                            except:
+                                                alarm_time_str = str(occur_time_str)
+                                elif occur_time_str:
+                                    try:
+                                        # occurTimeStr is formatted string "2026-01-18 19:30:11"
+                                        alarm_dt = datetime.strptime(occur_time_str, "%Y-%m-%d %H:%M:%S")
+                                        alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                    except Exception as time_error:
+                                        _LOGGER.debug(f"Could not parse occurTimeStr: {occur_time_str}, error: {time_error}")
+                                        alarm_time_str = str(occur_time_str)
+                                
+                                # Map severity to emoji (1=Critical, 2=Major, 3=Minor, 4=Warning)
+                                level_emoji = {
+                                    "1": "🔴",  # Critical
+                                    "2": "🟠",  # Major
+                                    "3": "🟡",  # Minor
+                                    "4": "⚪",  # Warning
+                                    "critical": "🔴",
+                                    "major": "🟠",
+                                    "minor": "🟡",
+                                    "warning": "⚪"
+                                }.get(str(severity).lower(), "⚠️")
+                                
+                                active_alarms.append({
+                                    "device": "Instalação",
+                                    "name": alarm_name,
+                                    "level": severity,
+                                    "time": alarm_time_str,
+                                    "emoji": level_emoji,
+                                    # raw_time usa o formato original da API (ex: "2026-01-19 11:00:13")
+                                    "raw_time": occur_time_str or ""
+                                })
+                                _LOGGER.warning(f"🚨 Active plant alarm in {plant_name}: {alarm_name} (Severity {severity}) at {alarm_time_str}")
+                                print(f"    🚨 {plant_name} (Instalação): {alarm_name} (Severidade {severity}) - {alarm_time_str}")
+                    except FusionSolarException as plant_alarm_error:
+                        error_msg = str(plant_alarm_error)
+                        _LOGGER.warning(f"FusionSolar API error getting plant alarms for {plant_name} on first attempt: {error_msg}")
+                        # Retry once after 10 seconds
+                        time.sleep(10)
+                        try:
+                            _LOGGER.info(f"Retrying get_plant_alarm_data for {plant_name} after error...")
+                            plant_alarm_data = client.get_plant_alarm_data(plant_id)
+                            _LOGGER.info(f"get_plant_alarm_data (retry) returned for {plant_name}: {type(plant_alarm_data)}, keys: {list(plant_alarm_data.keys()) if isinstance(plant_alarm_data, dict) else 'N/A'}")
+                            # Re-run parsing logic on retry
+                            plant_alarms = []
+                            if isinstance(plant_alarm_data, dict):
+                                _LOGGER.debug(f"🔍 Parsing plant alarm data structure for {plant_name} (retry)...")
+                                _LOGGER.debug(f"   Root level - keys: {list(plant_alarm_data.keys())}, success: {plant_alarm_data.get('success')}")
+                                def find_hits(data, path="root", max_depth=5):
+                                    if max_depth <= 0 or not isinstance(data, dict):
+                                        return None
+                                    if "hits" in data and isinstance(data["hits"], list):
+                                        return data["hits"]
+                                    if "data" in data and isinstance(data["data"], dict):
+                                        return find_hits(data["data"], f"{path}.data", max_depth-1)
+                                    return None
+                                plant_alarms = find_hits(plant_alarm_data) or []
+                            _LOGGER.info(f"Parsed {len(plant_alarms)} plant-level alarm(s) from retry response for {plant_name}")
+                            if plant_alarms:
+                                # Re-parse alarms with full formatting logic
+                                for alarm in plant_alarms:
+                                    if not isinstance(alarm, dict):
+                                        continue
+                                    alarm_name = alarm.get("alarmName") or "Alarme desconhecido"
+                                    severity = alarm.get("severity") or alarm.get("alarmLevel") or ""
+                                    
+                                    # Parse timestamp
+                                    alarm_time_str = ""
+                                    latest_occur_time = alarm.get("latestOccurTime")
+                                    occur_time_str = alarm.get("occurTimeStr")
+                                    
+                                    if latest_occur_time:
+                                        try:
+                                            # latestOccurTime is timestamp in milliseconds
+                                            alarm_dt = datetime.fromtimestamp(latest_occur_time / 1000)
+                                            alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                        except Exception:
+                                            alarm_time_str = str(latest_occur_time)
+                                    elif occur_time_str:
+                                        try:
+                                            alarm_dt = datetime.strptime(occur_time_str, "%Y-%m-%d %H:%M:%S")
+                                            alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                        except Exception:
+                                            alarm_time_str = str(occur_time_str)
+                                    
+                                    # Map severity to emoji
+                                    level_emoji = {
+                                        "1": "🔴",  # Critical
+                                        "2": "🟠",  # Major
+                                        "3": "🟡",  # Minor
+                                        "4": "⚪",  # Warning
+                                        "critical": "🔴",
+                                        "major": "🟠",
+                                        "minor": "🟡",
+                                        "warning": "⚪"
+                                    }.get(str(severity).lower(), "⚠️")
+                                    
+                                    active_alarms.append({
+                                        "device": "Instalação",
+                                        "name": alarm_name,
+                                        "level": severity,
+                                        "time": alarm_time_str,
+                                        "emoji": level_emoji,
+                                        "raw_time": occur_time_str or ""
+                                    })
+                        except Exception as retry_alarm_error:
+                            retry_msg = str(retry_alarm_error)
+                            retry_type = type(retry_alarm_error).__name__
+                            _LOGGER.warning(f"FusionSolar API error getting plant alarms for {plant_name} after retry: {retry_type} - {retry_msg}")
+                    except Exception as plant_alarm_error:
+                        error_msg = str(plant_alarm_error)
+                        error_type = type(plant_alarm_error).__name__
+                        _LOGGER.warning(f"Failed to get plant alarms for {plant_name}: {error_type} - {error_msg}", exc_info=True)
+                    
+                    # Then, check for inverter alarms
+                    # Verify client has get_inverter_ids (monkey-patched method)
+                    # Note: get_alarm_data() exists in fusion_solar_py library, so it's always available
+                    if not hasattr(client, 'get_inverter_ids'):
+                        _LOGGER.error(f"get_inverter_ids method not found on client for {plant_name}")
+                    else:
+                        # Get inverter IDs for this plant
+                        _LOGGER.info(f"Calling get_inverter_ids for {plant_name}...")
+                        inverter_ids = client.get_inverter_ids(plant_id)
+                        _LOGGER.info(f"get_inverter_ids returned {len(inverter_ids)} inverter(s) for {plant_name}: {inverter_ids}")
+                        
+                        if inverter_ids:
+                            # Check alarms for each inverter
+                            # get_alarm_data() is part of fusion_solar_py library, so it's always available
+                            for inverter_id in inverter_ids:
+                                # Skip if inverter_id is None or empty
+                                if not inverter_id:
+                                    _LOGGER.warning(f"Skipping alarm check for {plant_name}: inverter_id is None or empty")
+                                    continue
+                                
+                                try:
+                                    _LOGGER.info(f"Calling get_alarm_data for inverter {inverter_id} in {plant_name}...")
+                                    alarm_data = client.get_alarm_data(device_dn=inverter_id)
+                                    _LOGGER.info(f"get_alarm_data returned for {plant_name}: {type(alarm_data)}, keys: {list(alarm_data.keys()) if isinstance(alarm_data, dict) else 'N/A'}")
+                                    
+                                    # Parse alarm response - structure: data.data.data.hits[] (same as get_plant_alarm_data)
+                                    alarms = []
+                                    if isinstance(alarm_data, dict):
+                                        # Structure: {success: true, data: {success: true, data: {hits: [...]}}}
+                                        if alarm_data.get("success") and "data" in alarm_data:
+                                            level1_data = alarm_data["data"]
+                                            if isinstance(level1_data, dict) and level1_data.get("success") and "data" in level1_data:
+                                                level2_data = level1_data["data"]
+                                                if isinstance(level2_data, dict) and "hits" in level2_data:
+                                                    alarms = level2_data["hits"]
+                                                    if not isinstance(alarms, list):
+                                                        alarms = []
+                                    
+                                    _LOGGER.info(f"Parsed {len(alarms)} alarm(s) from response for {plant_name}")
+                                    if len(alarms) == 0 and isinstance(alarm_data, dict):
+                                        _LOGGER.debug(f"No alarms found for inverter {inverter_id}. Checking structure...")
+                                        if "data" in alarm_data:
+                                            level1 = alarm_data["data"]
+                                            if isinstance(level1, dict) and "data" in level1:
+                                                level2 = level1["data"]
+                                                if isinstance(level2, dict) and "hits" in level2:
+                                                    _LOGGER.debug(f"Found hits array with {len(level2['hits']) if isinstance(level2['hits'], list) else 'N/A'} items")
+                                    
+                                    if alarms:
+                                        for alarm in alarms:
+                                            if not isinstance(alarm, dict):
+                                                continue
+                                                
+                                            # Extract alarmName (required field from JSON structure)
+                                            alarm_name = alarm.get("alarmName") or "Alarme desconhecido"
+                                            
+                                            # Extract severity (can be number or string)
+                                            severity = alarm.get("severity")
+                                            if severity is None:
+                                                severity = alarm.get("alarmLevel") or ""
+                                            
+                                            # Extract time - prefer latestOccurTime (timestamp in ms), fallback to occurTimeStr
+                                            latest_occur_time = alarm.get("latestOccurTime")
+                                            occur_time_str = alarm.get("occurTimeStr")
+                                            alarm_time = latest_occur_time or occur_time_str or alarm.get("occurTime") or ""
+                                            
+                                            # Format alarm time if available
+                                            alarm_time_str = "N/A"
+                                            if latest_occur_time:
+                                                try:
+                                                    # latestOccurTime is timestamp in milliseconds
+                                                    if isinstance(latest_occur_time, (int, float)):
+                                                        alarm_dt = datetime.fromtimestamp(latest_occur_time / 1000)
+                                                        alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                                except Exception as time_error:
+                                                    _LOGGER.debug(f"Could not parse latestOccurTime: {latest_occur_time}, error: {time_error}")
+                                                    # Fallback to occurTimeStr if available
+                                                    if occur_time_str:
+                                                        try:
+                                                            alarm_dt = datetime.strptime(occur_time_str, "%Y-%m-%d %H:%M:%S")
+                                                            alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                                        except:
+                                                            alarm_time_str = str(occur_time_str)
+                                            elif occur_time_str:
+                                                try:
+                                                    # occurTimeStr is formatted string "2026-01-18 19:30:11"
+                                                    alarm_dt = datetime.strptime(occur_time_str, "%Y-%m-%d %H:%M:%S")
+                                                    alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                                except Exception as time_error:
+                                                    _LOGGER.debug(f"Could not parse occurTimeStr: {occur_time_str}, error: {time_error}")
+                                                    alarm_time_str = str(occur_time_str)
+                                            elif alarm_time:
+                                                try:
+                                                    # Fallback: try parsing as timestamp or date string
+                                                    if isinstance(alarm_time, (int, float)):
+                                                        alarm_dt = datetime.fromtimestamp(alarm_time / 1000)
+                                                        alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                                    elif isinstance(alarm_time, str):
+                                                        if alarm_time.isdigit():
+                                                            alarm_dt = datetime.fromtimestamp(int(alarm_time) / 1000)
+                                                            alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                                        else:
+                                                            alarm_time_str = str(alarm_time)
+                                                except Exception as time_error:
+                                                    _LOGGER.debug(f"Could not parse alarm time: {alarm_time}, error: {time_error}")
+                                                    alarm_time_str = str(alarm_time)
+                                            
+                                            # Map severity to emoji (1=Critical, 2=Major, 3=Minor, 4=Warning)
+                                            level_emoji = {
+                                                "1": "🔴",  # Critical
+                                                "2": "🟠",  # Major
+                                                "3": "🟡",  # Minor
+                                                "4": "⚪",  # Warning
+                                                "critical": "🔴",
+                                                "major": "🟠",
+                                                "minor": "🟡",
+                                                "warning": "⚪"
+                                            }.get(str(severity).lower(), "⚠️")
+                                            
+                                            active_alarms.append({
+                                                "device": "Inversor",
+                                                "name": alarm_name,
+                                                "level": severity,
+                                                "time": alarm_time_str,
+                                                "emoji": level_emoji
+                                            })
+                                            _LOGGER.warning(f"🚨 Active alarm in {plant_name} - Inversor: {alarm_name} (Severity {severity}) at {alarm_time_str}")
+                                            print(f"    🚨 {plant_name}: {alarm_name} (Severidade {severity}) - {alarm_time_str}")
+                                except (FusionSolarException, HTTPError) as alarm_error:
+                                    error_msg = str(alarm_error)
+                                    error_type = type(alarm_error).__name__
+                                    _LOGGER.warning(f"API error getting alarms for inverter {inverter_id} in {plant_name} on first attempt: {error_type} - {error_msg}")
+                                    # Retry once after 10 seconds
+                                    time.sleep(10)
+                                    try:
+                                        _LOGGER.info(f"Retrying get_alarm_data for inverter {inverter_id} in {plant_name} after error...")
+                                        alarm_data = client.get_alarm_data(device_dn=inverter_id)
+                                        _LOGGER.info(f"get_alarm_data (retry) returned for {plant_name}: {type(alarm_data)}, keys: {list(alarm_data.keys()) if isinstance(alarm_data, dict) else 'N/A'}")
+                                        # Re-run parsing logic on retry (same as first attempt)
+                                        alarms = []
+                                        if isinstance(alarm_data, dict):
+                                            if alarm_data.get("success") and "data" in alarm_data:
+                                                level1_data = alarm_data["data"]
+                                                if isinstance(level1_data, dict) and level1_data.get("success") and "data" in level1_data:
+                                                    level2_data = level1_data["data"]
+                                                    if isinstance(level2_data, dict) and "hits" in level2_data:
+                                                        alarms = level2_data["hits"]
+                                                        if not isinstance(alarms, list):
+                                                            alarms = []
+                                        _LOGGER.info(f"Parsed {len(alarms)} alarm(s) from retry response for {plant_name}")
+                                        # Process alarms if found
+                                        if alarms:
+                                            for alarm in alarms:
+                                                if not isinstance(alarm, dict):
+                                                    continue
+                                                alarm_name = alarm.get("alarmName") or "Alarme desconhecido"
+                                                severity = alarm.get("severity") or alarm.get("alarmLevel") or ""
+                                                latest_occur_time = alarm.get("latestOccurTime")
+                                                occur_time_str = alarm.get("occurTimeStr")
+                                                alarm_time_str = "N/A"
+                                                if latest_occur_time:
+                                                    try:
+                                                        alarm_dt = datetime.fromtimestamp(latest_occur_time / 1000)
+                                                        alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                                    except Exception:
+                                                        alarm_time_str = str(latest_occur_time)
+                                                elif occur_time_str:
+                                                    try:
+                                                        alarm_dt = datetime.strptime(occur_time_str, "%Y-%m-%d %H:%M:%S")
+                                                        alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                                    except Exception:
+                                                        alarm_time_str = str(occur_time_str)
+                                                level_emoji = {
+                                                    "1": "🔴", "2": "🟠", "3": "🟡", "4": "⚪",
+                                                    "critical": "🔴", "major": "🟠", "minor": "🟡", "warning": "⚪"
+                                                }.get(str(severity).lower(), "⚠️")
+                                                active_alarms.append({
+                                                    "device": "Inversor",
+                                                    "name": alarm_name,
+                                                    "level": severity,
+                                                    "time": alarm_time_str,
+                                                    "emoji": level_emoji
+                                                })
+                                                _LOGGER.warning(f"🚨 Active alarm in {plant_name} - Inversor: {alarm_name} (Severity {severity}) at {alarm_time_str}")
+                                                print(f"    🚨 {plant_name}: {alarm_name} (Severidade {severity}) - {alarm_time_str}")
+                                        continue
+                                    except Exception as retry_dev_error:
+                                        retry_msg = str(retry_dev_error)
+                                        retry_type = type(retry_dev_error).__name__
+                                        _LOGGER.warning(f"API error getting alarms for inverter {inverter_id} in {plant_name} after retry: {retry_type} - {retry_msg}")
+                                        continue
+                                except Exception as alarm_error:
+                                    error_msg = str(alarm_error)
+                                    error_type = type(alarm_error).__name__
+                                    _LOGGER.warning(f"Failed to get alarms for inverter {inverter_id} in {plant_name}: {error_type} - {error_msg}", exc_info=True)
+                                    # Retry once after 10 seconds for generic exceptions too
+                                    time.sleep(10)
+                                    try:
+                                        _LOGGER.info(f"Retrying get_alarm_data for inverter {inverter_id} in {plant_name} after generic error...")
+                                        alarm_data = client.get_alarm_data(device_dn=inverter_id)
+                                        _LOGGER.info(f"get_alarm_data (retry) returned for {plant_name}: {type(alarm_data)}, keys: {list(alarm_data.keys()) if isinstance(alarm_data, dict) else 'N/A'}")
+                                        # Re-run parsing logic on retry
+                                        alarms = []
+                                        if isinstance(alarm_data, dict):
+                                            if alarm_data.get("success") and "data" in alarm_data:
+                                                level1_data = alarm_data["data"]
+                                                if isinstance(level1_data, dict) and level1_data.get("success") and "data" in level1_data:
+                                                    level2_data = level1_data["data"]
+                                                    if isinstance(level2_data, dict) and "hits" in level2_data:
+                                                        alarms = level2_data["hits"]
+                                                        if not isinstance(alarms, list):
+                                                            alarms = []
+                                        _LOGGER.info(f"Parsed {len(alarms)} alarm(s) from retry response for {plant_name}")
+                                        # Process alarms if found (same logic as above)
+                                        if alarms:
+                                            for alarm in alarms:
+                                                if not isinstance(alarm, dict):
+                                                    continue
+                                                alarm_name = alarm.get("alarmName") or "Alarme desconhecido"
+                                                severity = alarm.get("severity") or alarm.get("alarmLevel") or ""
+                                                latest_occur_time = alarm.get("latestOccurTime")
+                                                occur_time_str = alarm.get("occurTimeStr")
+                                                alarm_time_str = "N/A"
+                                                if latest_occur_time:
+                                                    try:
+                                                        alarm_dt = datetime.fromtimestamp(latest_occur_time / 1000)
+                                                        alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                                    except Exception:
+                                                        alarm_time_str = str(latest_occur_time)
+                                                elif occur_time_str:
+                                                    try:
+                                                        alarm_dt = datetime.strptime(occur_time_str, "%Y-%m-%d %H:%M:%S")
+                                                        alarm_time_str = alarm_dt.strftime("%d/%m/%Y %H:%M")
+                                                    except Exception:
+                                                        alarm_time_str = str(occur_time_str)
+                                                level_emoji = {
+                                                    "1": "🔴", "2": "🟠", "3": "🟡", "4": "⚪",
+                                                    "critical": "🔴", "major": "🟠", "minor": "🟡", "warning": "⚪"
+                                                }.get(str(severity).lower(), "⚠️")
+                                                active_alarms.append({
+                                                    "device": "Inversor",
+                                                    "name": alarm_name,
+                                                    "level": severity,
+                                                    "time": alarm_time_str,
+                                                    "emoji": level_emoji
+                                                })
+                                                _LOGGER.warning(f"🚨 Active alarm in {plant_name} - Inversor: {alarm_name} (Severity {severity}) at {alarm_time_str}")
+                                                print(f"    🚨 {plant_name}: {alarm_name} (Severidade {severity}) - {alarm_time_str}")
+                                        continue
+                                    except Exception as retry_generic_error:
+                                        retry_msg = str(retry_generic_error)
+                                        retry_type = type(retry_generic_error).__name__
+                                        _LOGGER.warning(f"API error getting alarms for inverter {inverter_id} in {plant_name} after retry: {retry_type} - {retry_msg}")
+                                        continue
+                        
+                        if active_alarms:
+                            _LOGGER.info(f"Found {len(active_alarms)} active alarm(s) in {plant_name}")
+                            print(f"    ⚠️  {plant_name}: {len(active_alarms)} alarme(s) ativo(s)")
+                            # Add alarms to alerts
+                            for alarm in active_alarms:
+                                device_type = alarm.get('device', 'Dispositivo')
+                                result["alerts"].append(
+                                    f"{alarm['emoji']} {plant_name} - {alarm['name']} ({device_type}, {alarm['time']})"
+                                )
+                        else:
+                            _LOGGER.debug(f"No active alarms found in {plant_name}")
+                except AttributeError as e:
+                    error_msg = str(e)
+                    _LOGGER.error(f"Attribute error when checking alarms for {plant_name}: {error_msg}", exc_info=True)
+                    print(f"    ❌ Erro ao verificar alarmes em {plant_name}: método não disponível")
+                except Exception as e:
+                    error_msg = str(e)
+                    error_type = type(e).__name__
+                    _LOGGER.warning(f"Error checking alarms for {plant_name}: {error_type} - {error_msg}", exc_info=True)
+                    # Don't fail the whole process if alarm check fails - just log and continue
+                finally:
+                    # If we have any active alarms (plant-level or inverter-level),
+                    # they explain the disconnect reason, so we skip the generic
+                    # "Instalação Desligada" alert to avoid duplication.
+                    if disconnected_alert_msg:
+                        if active_alarms:
+                            _LOGGER.info(
+                                f"Skipping generic disconnect alert for {plant_name} because {len(active_alarms)} active alarm(s) were found"
+                            )
+                        else:
+                            result["alerts"].append(disconnected_alert_msg)
+            # If plant is disconnected and we have active alarms, override display to reflect alarm state:
+            # - Use alarm emoji as status_icon
+            # - Use alarm timestamp as last_data_time
+            # - Force metrics to 0/-- in the table
+            if plant['plantStatus'] == 'disconnected' and active_alarms:
+                # Prefer installation-level alarms; fallback to any alarm
+                installation_alarms = [a for a in active_alarms if a.get("device") == "Instalação"]
+                candidate_alarms = installation_alarms or active_alarms
+
+                def alarm_severity_rank(a):
+                    sev = str(a.get("level", "")).lower()
+                    mapping = {
+                        "1": 0, "critical": 0,
+                        "2": 1, "major": 1,
+                        "3": 2, "minor": 2,
+                        "4": 3, "warning": 3,
+                    }
+                    return mapping.get(sev, 4)
+
+                main_alarm = sorted(candidate_alarms, key=alarm_severity_rank)[0]
+
+                # Override status icon with alarm emoji
+                status_icon = main_alarm.get("emoji", status_icon)
+
+                # Override last_data_time with alarm raw time if available (API format YYYY-MM-DD HH:MM:SS)
+                alarm_raw_time = main_alarm.get("raw_time")
+                alarm_display_time = main_alarm.get("time")
+                if alarm_raw_time:
+                    # Strip seconds to keep consistent with other timestamps (YYYY-MM-DD HH:MM)
+                    try:
+                        dt = datetime.strptime(alarm_raw_time, "%Y-%m-%d %H:%M:%S")
+                        last_data_time = dt.strftime("%Y-%m-%d %H:%M")
+                    except Exception:
+                        last_data_time = alarm_raw_time
+                elif alarm_display_time:
+                    # alarm_display_time está em formato PT (DD/MM/YYYY HH:MM)
+                    try:
+                        dt = datetime.strptime(alarm_display_time, "%d/%m/%Y %H:%M")
+                        last_data_time = dt.strftime("%Y-%m-%d %H:%M")
+                    except Exception:
+                        last_data_time = alarm_display_time
+
+                # Forçar métricas a zero para indicar que não há dados válidos atuais
+                # Ajustar os totais removendo os valores originais e adicionando zero
+                result["production"] = result["production"] - original_production + 0.0
+                result["consumption"] = result["consumption"] - original_consumption + 0.0
+                result["grid"] = result["grid"] - original_grid + 0.0
+                
+                production_power = 0.0
+                consumption_power = 0.0
+                grid_power = 0.0
+                surplus_power = 0.0
+
+            else:
+                # Plant is connected, skip alarm check to reduce API calls
+                _LOGGER.debug(f"Skipping alarm check for {plant_name} - plant is connected")
 
             result["statuses"].append({
                 "name": plant['name'],
@@ -783,7 +1752,10 @@ def process_account(account):
                 "consumption": consumption_power,
                 "grid": grid_power,
                 "surplus": surplus_power,
-                "status_icon": status_icon
+                "status_icon": status_icon,
+                "last_data_time": last_data_time,  # Timestamp do último dado válido
+                "active_alarms": active_alarms,  # Include alarms for this plant
+                "alarm_count": len(active_alarms)  # Count of active alarms
             })
 
             # chart data
@@ -796,6 +1768,7 @@ def process_account(account):
                 result["summed_consumption"] = [0] * len(consumption_power_filtered)
                 result["summed_self_consumption"] = [0] * len(self_use_power_filtered)
                 result["summed_overflow"] = [0] * len(product_power_filtered)
+                result["summed_grid"] = [0] * len(product_power_filtered)  # NOVO
 
             result["summed_production"] = [
                 round(s + c, 2) for s, c in zip(result["summed_production"], product_power_filtered)
@@ -809,6 +1782,11 @@ def process_account(account):
             result["summed_overflow"] = [
                 round(s + max(prod - cons, 0), 2)
                 for s, prod, cons in zip(result["summed_overflow"], product_power_filtered, consumption_power_filtered)
+            ]
+            # NOVO: Consumo da Rede = parte do consumo que vem da rede (quando consumo > produção)
+            result["summed_grid"] = [
+                round(s + max(cons - prod, 0), 2)
+                for s, prod, cons in zip(result["summed_grid"], product_power_filtered, consumption_power_filtered)
             ]
 
         # Don't log out - keep session alive for reuse
@@ -841,6 +1819,7 @@ def _fetch_live_data():
         statuses = []
         zero_production_plants = []
         summed_production = summed_consumption = summed_self_consumption = summed_overflow = None
+        summed_grid = None  # NOVO
         account_summaries = []  # Track stations per account
 
         with ThreadPoolExecutor(max_workers=5) as executor:
@@ -866,11 +1845,17 @@ def _fetch_live_data():
                         summed_consumption = r["summed_consumption"]
                         summed_self_consumption = r["summed_self_consumption"]
                         summed_overflow = r["summed_overflow"]
+                        summed_grid = r.get("summed_grid")  # NOVO
                     else:
                         summed_production = [a + b for a, b in zip(summed_production, r["summed_production"])]
                         summed_consumption = [a + b for a, b in zip(summed_consumption, r["summed_consumption"])]
                         summed_self_consumption = [a + b for a, b in zip(summed_self_consumption, r["summed_self_consumption"])]
                         summed_overflow = [a + b for a, b in zip(summed_overflow, r["summed_overflow"])]
+                        # NOVO: combinar summed_grid
+                        if summed_grid is not None and r.get("summed_grid") is not None:
+                            summed_grid = [a + b for a, b in zip(summed_grid, r["summed_grid"])]
+                        elif summed_grid is None and r.get("summed_grid") is not None:
+                            summed_grid = r["summed_grid"]
 
         # Print summary of installations per account
         _LOGGER.info("="*60)
@@ -893,7 +1878,24 @@ def _fetch_live_data():
         
         alert_message = "✅ Todas as instalações estão a funcionar normalmente."
         if zero_production_plants:
-            zero_production_plants.sort(key=lambda x: x.startswith("⏳"))
+            # Sort alerts by priority: 🔴 (critical) first, then 🟠 (major), then ⏳, then 🟡 (minor), then ⚪ (warning), then ⚠️
+            def alert_priority(alert):
+                if alert.startswith("🔴"):
+                    return 0  # Highest priority - Critical
+                elif alert.startswith("🟠"):
+                    return 1  # Major alarms
+                elif alert.startswith("⏳"):
+                    return 2  # In maintenance
+                elif alert.startswith("🟡"):
+                    return 3  # Minor alarms
+                elif alert.startswith("⚪"):
+                    return 4  # Warning alarms
+                elif alert.startswith("⚠️"):
+                    return 5
+                else:
+                    return 6  # Lowest priority
+            
+            zero_production_plants.sort(key=alert_priority)
             alert_message = "As seguintes instalações estão com problemas:\n" + "\n".join([f"- {p}" for p in zero_production_plants])
 
         current_time = datetime.now().strftime('%H:%M')
@@ -907,12 +1909,14 @@ def _fetch_live_data():
             summed_consumption = summed_consumption[:n]
             summed_self_consumption = summed_self_consumption[:n]
             summed_overflow = summed_overflow[:n]
+            summed_grid = summed_grid[:n] if summed_grid is not None else []  # NOVO
         else:
             # If no chart data available, use empty arrays
             summed_production = []
             summed_consumption = []
             summed_self_consumption = []
             summed_overflow = []
+            summed_grid = []  # NOVO
 
         # Get current timestamp for last updated
         last_updated_datetime = datetime.now()
@@ -927,7 +1931,8 @@ def _fetch_live_data():
             "chart": {
                 "x_axis": filtered_axis,
                 "production": summed_production,
-                "consumption": summed_consumption,
+                "grid_consumption": summed_grid,          # NOVO: Consumo da Rede (gráfico)
+                "consumption": summed_consumption,        # Consumo Total
                 "self_consumption": summed_self_consumption,
                 "surplus": summed_overflow
             },
@@ -943,6 +1948,43 @@ def _fetch_live_data():
         print(f"❌ Critical error in data fetch: {error_type}: {error_msg}")
         return {"error": "Erro ao carregar dados 😞"}
 
+def _update_chart_x_axis_for_current_time(cached_data):
+    """
+    Update the chart x_axis and pad data arrays with null values for time points
+    that have passed since the data was cached, but don't have data yet.
+    """
+    from datetime import datetime
+    current_time_str = datetime.now().strftime('%H:%M')
+    
+    # Generate full x_axis up to current time
+    x_axis = [f"{h:02d}:{m:02d}" for h in range(24) for m in range(0, 60, 5)]
+    filtered_axis = [t for t in x_axis if t <= current_time_str]
+    
+    if "chart" not in cached_data or not cached_data["chart"]:
+        return cached_data
+    
+    chart = cached_data["chart"]
+    old_x_axis = chart.get("x_axis", [])
+    old_length = len(old_x_axis)
+    new_length = len(filtered_axis)
+    
+    # If no new time points have passed, return data as-is
+    if new_length <= old_length:
+        return cached_data
+    
+    # Update x_axis to current time
+    chart["x_axis"] = filtered_axis
+    
+    # Pad all data arrays with null values for new time points
+    arrays_to_pad = ["production", "grid_consumption", "consumption", "self_consumption", "surplus"]
+    for array_name in arrays_to_pad:
+        if array_name in chart and isinstance(chart[array_name], list):
+            # Add null values for new time points
+            num_new_points = new_length - old_length
+            chart[array_name].extend([None] * num_new_points)
+    
+    return cached_data
+
 @app.route("/api/live-data")
 def live_data():
     """API endpoint with caching to reduce Fusion Solar API calls"""
@@ -953,10 +1995,13 @@ def live_data():
         cache_age = current_time - _data_cache["timestamp"]
         
         if _data_cache["data"] is not None and cache_age < CACHE_DURATION:
-            # Return cached data (keep original last_updated from when it was fetched)
+            # Update x_axis to current time (adds null values for new time points)
+            # Use deepcopy to avoid modifying the original cached data
+            cached_data_copy = copy.deepcopy(_data_cache["data"])
+            cached_data_copy = _update_chart_x_axis_for_current_time(cached_data_copy)
             _LOGGER.info(f"Returning cached data (age: {int(cache_age)}s, remaining: {int(CACHE_DURATION - cache_age)}s)")
             print(f"📦 Returning cached data (age: {int(cache_age)}s)")
-            return jsonify(_data_cache["data"])
+            return jsonify(cached_data_copy)
         
         # Cache expired or doesn't exist, fetch fresh data
         _LOGGER.info("Cache expired or missing, fetching fresh data from Fusion Solar API...")

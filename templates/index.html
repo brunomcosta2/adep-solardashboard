@@ -19,9 +19,19 @@
 		<span id="time-icon">🕐 </span>
 		<span id="time">--:--</span>
 	  </div>
-	  <div id="last-updated" style="margin-top: 10px; font-size: 0.9em; color: #ccc;">
-		<span>📊 Última atualização: </span>
-		<span id="last-updated-time">--:--:--</span>
+	  <div id="update-widget">
+		<div class="update-line">
+		  <span id="update-icon">📊</span>
+		  <span id="update-label">Última Atualização:</span>
+		  <span id="last-updated-time">--/--/---- --:--:--</span>
+		</div>
+		<div class="update-line">
+		  <span id="connection-indicator">🟢</span>
+		  <span id="connection-text">Conectado</span>
+		  <span id="update-separator">|</span>
+		  <span id="update-indicator">🔄</span>
+		  <span id="next-update-countdown">Próxima Atualização: --:--</span>
+		</div>
 	  </div>
 	</header>
   <div id="loading-overlay">
@@ -81,8 +91,9 @@
 			  <th>Potência Instalada (kWp)</th>
 			  <th>Produção (kW)</th>
 			  <th>Consumo Total (kW)</th>
-			  <th>Consumo da Rede (kW)</th>			  
+			  <th>Consumo da Rede (kW)</th>
 			  <th>Excedente (kW)</th>
+			  <th>Últimos Dados</th>
 			  <th>Status</th>
 			</tr>
       </thead>

@@ -24,13 +24,20 @@ body::-webkit-scrollbar-thumb {
 header {
   display: flex;
   justify-content: space-between;
-  align-items: center;  /* Vertically centers the content */
+  align-items: flex-start;  /* Align to top so widgets can have same height */
   padding: 20px;
   background: #1e1e2f;
   flex-wrap: wrap;
 }
 header h1 {
   margin: 0;
+}
+
+/* Widgets container to ensure same height */
+header > div:last-child {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 /* Weather widget */
@@ -46,6 +53,8 @@ header h1 {
   font-weight: 600;
   box-shadow: 0 2px 6px rgba(0,0,0,0.4);
   transition: background 0.3s ease;
+  height: 75px;
+  box-sizing: border-box;
 }
 
 #weather-widget span {
@@ -58,6 +67,100 @@ header h1 {
 
 #weather-icon {
   font-size: 1.3rem;
+}
+
+/* Update widget - similar to weather widget, with two lines */
+#update-widget {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: #2a2a3b;
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 600;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+  transition: background 0.3s ease;
+  height: 75px;
+  box-sizing: border-box;
+  justify-content: center;
+}
+
+.update-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 1;
+}
+
+#update-widget span {
+  line-height: 1;
+}
+
+#update-widget:hover {
+  background: #33334a;
+}
+
+#update-icon {
+  font-size: 1.1rem;
+}
+
+#update-indicator {
+  font-size: 1.1rem;
+  animation: spin 2s linear infinite;
+  display: inline-block;
+}
+
+#update-indicator.updating {
+  animation: spin 1s linear infinite;
+}
+
+#next-update-countdown {
+  color: #4CAF50;
+  font-weight: 500;
+}
+
+#next-update-countdown.warning {
+  color: #FFB74D;
+}
+
+#next-update-countdown.critical {
+  color: #f44336;
+}
+
+/* Connection status integrated in update widget */
+#connection-indicator {
+  font-size: 1.1rem;
+  transition: transform 0.3s ease;
+}
+
+#update-widget.disconnected #connection-indicator {
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+#connection-text {
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+#update-widget.connected #connection-text {
+  color: #4CAF50;
+}
+
+#update-widget.disconnected #connection-text {
+  color: #f44336;
+}
+
+#update-separator {
+  color: #666;
+  margin: 0 4px;
+  font-size: 0.85rem;
 }
 
 
@@ -133,15 +236,15 @@ header h1 {
   box-shadow: 0 6px 15px rgba(0,0,0,0.4);
 }
 
-/* Color accents for different card types */
+/* Color accents for different card types (aligned with chart/table palette) */
 #prod {
-  border-left: 4px solid #4CAF50; /* Green for production */
+  border-left: 4px solid #FFB300; /* Produção */
 }
 #cons {
-  border-left: 4px solid #FF9800; /* Orange for consumption */
+  border-left: 4px solid #42A5F5; /* Consumo Total */
 }
 #grid {
-  border-left: 4px solid #2196F3; /* Blue for grid */
+  border-left: 4px solid #EF5350; /* Consumo da Rede */
 }
 #plants {
   border-left: 4px solid #9C27B0; /* Purple for plants count */
@@ -244,6 +347,8 @@ header h1 {
   overflow: hidden;
   max-height: 400px;       /* scrollable height */
   overflow-y: auto;
+  /* scroll-behavior removed - JavaScript autoScrollTable() controls scroll manually */
+  position: relative;
 }
 
 .table-wrapper::-webkit-scrollbar {
@@ -327,24 +432,24 @@ td {
   font-style: italic;
 }
 
-/* Production values - subtle green tint */
+/* Production values - subtle tint aligned with #FFB300 */
 .prod-value {
-  color: #81C784;
+  color: #FFB300;
 }
 
-/* Consumption values - subtle orange tint */
+/* Total consumption values - subtle tint aligned with #42A5F5 */
 .cons-value {
-  color: #FFB74D;
+  color: #42A5F5;
 }
 
-/* Grid consumption - subtle blue tint */
+/* Grid consumption - subtle tint aligned with #EF5350 */
 .grid-value {
-  color: #64B5F6;
+  color: #EF5350;
 }
 
-/* Surplus values - subtle green tint */
+/* Surplus values - subtle teal tint aligned with #26A69A */
 .surplus-value {
-  color: #4CAF50;
+  color: #26A69A;
   font-weight: 600;
 }
 
