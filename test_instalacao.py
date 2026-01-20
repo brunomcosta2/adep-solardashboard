@@ -57,6 +57,11 @@ if sys.platform == 'win32':
 from fusion_solar_py.client import FusionSolarClient
 from fusion_solar_py.exceptions import FusionSolarException
 import time
+import logging
+
+# Configure logging to reduce spam from fusion_solar_py library
+# Silence the "parsing MAX JS NUMBER" warnings (these are expected when API returns no data)
+logging.getLogger("fusion_solar_py.client").setLevel(logging.ERROR)
 
 # Tentar importar python-dotenv
 try:
@@ -556,6 +561,7 @@ def main():
     plant = None
     client = None
     used_account = None
+    all_stations_by_account = {}  # Guardar todas as estações de todas as contas
     
     for account in accounts:
         account_name = account["name"]
@@ -587,6 +593,9 @@ def main():
         stations = result["data"]
         print(f"  ✓ Encontradas {len(stations)} estações na {account_name}")
         
+        # Guardar estações desta conta para mostrar depois se necessário
+        all_stations_by_account[account_name] = stations
+        
         # Procurar a instalação específica
         for station in stations:
             if station.get("name") == plant_name:
@@ -606,15 +615,24 @@ def main():
     if not plant:
         print(f"  ❌ Instalação '{plant_name}' não encontrada em nenhuma das contas!")
         print()
-        print("  Estações disponíveis nas contas verificadas:")
-        # Mostrar estações da última conta tentada
-        if client:
-            result = safe_call(client.get_station_list)
-            if result.get("success") and result.get("data"):
-                for station in result["data"][:20]:  # Mostrar até 20
-                    print(f"    - {station.get('name', 'N/A')}")
-                if len(result["data"]) > 20:
-                    print(f"    ... e mais {len(result['data']) - 20} estações")
+        print("  📋 Estações disponíveis em todas as contas:")
+        print()
+        
+        # Mostrar estações de todas as contas
+        total_stations = 0
+        for account_name, stations in all_stations_by_account.items():
+            if stations:
+                print(f"  {account_name} ({len(stations)} estação(ões)):")
+                for station in stations:
+                    station_name = station.get('name', 'N/A')
+                    print(f"    - {station_name}")
+                    total_stations += 1
+                print()
+        
+        if total_stations == 0:
+            print("    ⚠️  Nenhuma estação encontrada em nenhuma conta.")
+        else:
+            print(f"  Total: {total_stations} estação(ões) em {len(all_stations_by_account)} conta(s)")
         return
     
     if not client:

@@ -118,16 +118,6 @@ app = Flask(__name__)
 # Disable caching for static files in development
 # This ensures browser always gets latest version of JS/CSS files
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
-if app.debug:
-    # In debug mode, add cache-busting headers
-    @app.after_request
-    def add_no_cache_headers(response):
-        if request.endpoint and 'static' in request.endpoint:
-            response.cache_control.no_store = True
-            response.cache_control.no_cache = True
-            response.cache_control.must_revalidate = True
-            response.cache_control.max_age = 0
-        return response
 
 # Set debug mode based on environment
 # In production with gunicorn, debug should be False for security
@@ -139,6 +129,19 @@ else:
     # Development mode - can use debug=True when running directly
     app.config['DEBUG'] = True
     _LOGGER.info("Running in DEVELOPMENT mode (debug=True)")
+
+# Add cache-busting headers for static files in debug mode
+# NOTE: This must be after debug mode is configured (line 140) to work correctly
+if app.debug:
+    # In debug mode, add cache-busting headers
+    @app.after_request
+    def add_no_cache_headers(response):
+        if request.endpoint and 'static' in request.endpoint:
+            response.cache_control.no_store = True
+            response.cache_control.no_cache = True
+            response.cache_control.must_revalidate = True
+            response.cache_control.max_age = 0
+        return response
 
 # Hybrid approach: Session pool + Data cache (optimized for Raspberry Pi)
 # Session pool maintains persistent connections to reduce logins
@@ -161,6 +164,15 @@ DISCONNECTED_RED_THRESHOLD_HOURS = 8  # Hours
 # CAPTCHA Configuration
 # Path to the captcha model file (relative to app.py location)
 CAPTCHA_MODEL_PATH = os.path.join("models", "captcha_huawei.onnx")
+
+# Default accounts (fallback if .env is not available or not configured)
+DEFAULT_ACCOUNTS = [
+    ("DomusSocial", "UpacsDM@2023FNT", "uni004eu5"),  # Porto Solar
+    ("AEdP_EDS", "AEdP@2024", "uni003eu5"),  # Parque da Trindade
+    ("UPAC_AMIAL", "amial2023", "uni003eu5"),  # Agra do Amial
+    ("Adeporto", "Tribunal-2030", "uni001eu5"),  # Tribunal
+    ("mapadeporto", "info-2030", "uni005eu5"), # MAP funcional
+]
 
 # Load environment variables from .env file if available
 if DOTENV_AVAILABLE:
