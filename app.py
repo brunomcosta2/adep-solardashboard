@@ -18,6 +18,16 @@ from fusion_solar_py.exceptions import FusionSolarException
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
+# Try to import python-dotenv for .env file support
+try:
+    from dotenv import load_dotenv
+    DOTENV_AVAILABLE = True
+except ImportError:
+    DOTENV_AVAILABLE = False
+    _LOGGER = logging.getLogger(__name__)
+    _LOGGER.warning("python-dotenv not installed. Install with: pip install python-dotenv")
+    _LOGGER.warning("Continuing without .env file support, using hardcoded credentials...")
+
 # Configure logging with timestamps and detailed formatting
 # Create logs directory if it doesn't exist
 logs_dir = 'logs'
@@ -152,14 +162,82 @@ DISCONNECTED_RED_THRESHOLD_HOURS = 8  # Hours
 # Path to the captcha model file (relative to app.py location)
 CAPTCHA_MODEL_PATH = os.path.join("models", "captcha_huawei.onnx")
 
-#Configuration
-accounts = [
-    ("DomusSocial", "UpacsDM@2023FNT", "uni004eu5"),  # Porto Solar
-    ("AEdP_EDS", "AEdP@2024", "uni003eu5"),  # Parque da Trindade
-    ("UPAC_AMIAL", "amial2023", "uni003eu5"),  # Agra do Amial
-    ("Adeporto", "Tribunal-2030", "uni001eu5"),  # Tribunal
-    ("mapadeporto", "info-2030", "uni005eu5"), # MAP funcional
-]
+# Load environment variables from .env file if available
+if DOTENV_AVAILABLE:
+    load_dotenv()
+
+# Default accounts (used as fallback if .env is not available or has no accounts)
+#DEFAULT_ACCOUNTS = [
+#    ("DomusSocial", "UpacsDM@2023FNT", "uni004eu5"),  # Porto Solar
+#    ("AEdP_EDS", "AEdP@2024", "uni003eu5"),  # Parque da Trindade
+#    ("UPAC_AMIAL", "amial2023", "uni003eu5"),  # Agra do Amial
+#    ("Adeporto", "Tribunal-2030", "uni001eu5"),  # Tribunal
+#    ("mapadeporto", "info-2030", "uni005eu5"), # MAP funcional
+#]
+
+def load_accounts_from_env():
+    """
+    Load multiple accounts from .env file.
+    
+    Expected format in .env:
+    ACCOUNT_1_USER=username1
+    ACCOUNT_1_PASSWORD=password1
+    ACCOUNT_1_SUBDOMAIN=subdomain1
+    ACCOUNT_2_USER=username2
+    ACCOUNT_2_PASSWORD=password2
+    ACCOUNT_2_SUBDOMAIN=subdomain2
+    ...
+    
+    Returns list of tuples: [(USER, PASSWORD, SUBDOMAIN), ...]
+    Compatible with existing get_or_create_client() function.
+    """
+    accounts = []
+    
+    if not DOTENV_AVAILABLE:
+        # If dotenv is not available, return default accounts
+        _LOGGER = logging.getLogger(__name__)
+        _LOGGER.info("Using default hardcoded accounts (python-dotenv not available)")
+        return DEFAULT_ACCOUNTS
+    
+    # Search for numbered accounts (ACCOUNT_1_*, ACCOUNT_2_*, etc.)
+    account_num = 1
+    while True:
+        user_key = f"ACCOUNT_{account_num}_USER"
+        password_key = f"ACCOUNT_{account_num}_PASSWORD"
+        subdomain_key = f"ACCOUNT_{account_num}_SUBDOMAIN"
+        
+        user = os.getenv(user_key)
+        password = os.getenv(password_key)
+        subdomain = os.getenv(subdomain_key)
+        
+        # If we don't find at least one of the variables, stop
+        if not (user and password and subdomain):
+            break
+        
+        accounts.append((user, password, subdomain))
+        account_num += 1
+    
+    # If no numbered accounts found, try unnumbered variables (backwards compatibility)
+    if not accounts:
+        user = os.getenv("ACCOUNT_USER")
+        password = os.getenv("ACCOUNT_PASSWORD")
+        subdomain = os.getenv("ACCOUNT_SUBDOMAIN")
+        
+        if user and password and subdomain:
+            accounts.append((user, password, subdomain))
+    
+    # If no accounts found in .env, use defaults
+    if not accounts:
+        _LOGGER = logging.getLogger(__name__)
+        _LOGGER.info("No accounts found in .env file, using default hardcoded accounts")
+        return DEFAULT_ACCOUNTS
+    
+    _LOGGER = logging.getLogger(__name__)
+    _LOGGER.info(f"Loaded {len(accounts)} account(s) from .env file")
+    return accounts
+
+# Load accounts from .env or use defaults
+accounts = load_accounts_from_env()
 
 def custom_get_station_list(self) -> list:
     """Get all stations with pagination support"""
