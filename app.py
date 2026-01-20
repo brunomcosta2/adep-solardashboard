@@ -164,15 +164,16 @@ DISCONNECTED_RED_THRESHOLD_HOURS = 8  # Hours
 
 # CAPTCHA Configuration
 # Path to the captcha model file (relative to app.py location)
-CAPTCHA_MODEL_PATH = os.path.join("models", "captcha_huawei.onnx")
+# Use absolute path based on app directory to ensure it works in production
+_app_dir = os.path.dirname(os.path.abspath(__file__))
+CAPTCHA_MODEL_PATH = os.path.join(_app_dir, "models", "captcha_huawei.onnx")
 
 # Default accounts (fallback if .env is not available or not configured)
+# IMPORTANT: For production, use .env file instead of hardcoded credentials
+# This is only a fallback for development/testing
 DEFAULT_ACCOUNTS = [
-    ("DomusSocial", "UpacsDM@2023FNT", "uni004eu5"),  # Porto Solar
-    ("AEdP_EDS", "AEdP@2024", "uni003eu5"),  # Parque da Trindade
-    ("UPAC_AMIAL", "amial2023", "uni003eu5"),  # Agra do Amial
-    ("Adeporto", "Tribunal-2030", "uni001eu5"),  # Tribunal
-    ("mapadeporto", "info-2030", "uni005eu5"), # MAP funcional
+    # Example format: (USERNAME, PASSWORD, SUBDOMAIN)
+    # Configure accounts via .env file (see env.example) for security
 ]
 
 # Load environment variables from .env file if available
@@ -242,6 +243,124 @@ def load_accounts_from_env():
 
 # Load accounts from .env or use defaults
 accounts = load_accounts_from_env()
+
+def validate_startup_requirements():
+    """
+    Validate that all required files and configurations are present at startup.
+    This helps catch configuration issues early, especially in production.
+    """
+    _LOGGER.info("="*60)
+    _LOGGER.info("STARTUP VALIDATION")
+    _LOGGER.info("="*60)
+    
+    issues = []
+    warnings = []
+    
+    # 1. Check CAPTCHA model
+    if os.path.exists(CAPTCHA_MODEL_PATH):
+        if os.access(CAPTCHA_MODEL_PATH, os.R_OK):
+            _LOGGER.info(f"✅ CAPTCHA model found: {CAPTCHA_MODEL_PATH}")
+        else:
+            warnings.append(f"CAPTCHA model exists but is not readable: {CAPTCHA_MODEL_PATH}")
+            _LOGGER.warning(f"⚠️  {warnings[-1]}")
+    else:
+        # Try alternative paths
+        alt_paths = [
+            os.path.join(os.getcwd(), "models", "captcha_huawei.onnx"),
+            os.path.join(os.getcwd(), "src", "models", "captcha_huawei.onnx"),
+            "models/captcha_huawei.onnx",
+            "src/models/captcha_huawei.onnx",
+        ]
+        found = False
+        for alt_path in alt_paths:
+            abs_alt = os.path.abspath(alt_path)
+            if os.path.exists(abs_alt) and os.access(abs_alt, os.R_OK):
+                _LOGGER.info(f"✅ CAPTCHA model found at alternative path: {abs_alt}")
+                found = True
+                break
+        if not found:
+            warnings.append("CAPTCHA model not found. Login may fail if CAPTCHA is required.")
+            _LOGGER.warning(f"⚠️  {warnings[-1]}")
+    
+    # 2. Check accounts configuration
+    if not accounts or len(accounts) == 0:
+        issues.append("No accounts configured. Please set up accounts in .env file or DEFAULT_ACCOUNTS.")
+        _LOGGER.error(f"❌ {issues[-1]}")
+    else:
+        _LOGGER.info(f"✅ {len(accounts)} account(s) configured")
+        # Log account names (without passwords) for verification
+        account_names = [acc[0] for acc in accounts]
+        _LOGGER.info(f"   Account names: {', '.join(account_names)}")
+    
+    # 3. Check required directories
+    required_dirs = ["static", "templates", "models"]
+    for dir_name in required_dirs:
+        dir_path = os.path.join(_app_dir, dir_name)
+        if os.path.exists(dir_path) and os.path.isdir(dir_path):
+            _LOGGER.info(f"✅ Directory '{dir_name}' exists")
+        else:
+            warnings.append(f"Directory '{dir_name}' not found at {dir_path}")
+            _LOGGER.warning(f"⚠️  {warnings[-1]}")
+    
+    # 4. Check static files
+    static_files = ["style.css", "script.js"]
+    for file_name in static_files:
+        file_path = os.path.join(_app_dir, "static", file_name)
+        if os.path.exists(file_path):
+            _LOGGER.info(f"✅ Static file '{file_name}' found")
+        else:
+            issues.append(f"Required static file '{file_name}' not found at {file_path}")
+            _LOGGER.error(f"❌ {issues[-1]}")
+    
+    # 5. Check templates
+    template_file = os.path.join(_app_dir, "templates", "index.html")
+    if os.path.exists(template_file):
+        _LOGGER.info(f"✅ Template 'index.html' found")
+    else:
+        issues.append(f"Required template 'index.html' not found at {template_file}")
+        _LOGGER.error(f"❌ {issues[-1]}")
+    
+    # 6. Check logs directory (will be created if missing, but good to verify)
+    logs_dir = os.path.join(_app_dir, "logs")
+    if os.path.exists(logs_dir):
+        _LOGGER.info(f"✅ Logs directory exists")
+    else:
+        _LOGGER.info(f"ℹ️  Logs directory will be created on first log write")
+    
+    # Summary
+    _LOGGER.info("="*60)
+    if issues:
+        _LOGGER.error(f"❌ STARTUP VALIDATION FAILED: {len(issues)} critical issue(s) found")
+        for issue in issues:
+            _LOGGER.error(f"   - {issue}")
+        _LOGGER.error("="*60)
+        print("\n" + "="*60)
+        print("❌ STARTUP VALIDATION FAILED")
+        print("="*60)
+        for issue in issues:
+            print(f"   ❌ {issue}")
+        print("="*60 + "\n")
+    else:
+        _LOGGER.info(f"✅ STARTUP VALIDATION PASSED")
+        if warnings:
+            _LOGGER.warning(f"⚠️  {len(warnings)} warning(s) (non-critical):")
+            for warning in warnings:
+                _LOGGER.warning(f"   - {warning}")
+        _LOGGER.info("="*60)
+        print("\n" + "="*60)
+        print("✅ STARTUP VALIDATION PASSED")
+        if warnings:
+            print(f"⚠️  {len(warnings)} warning(s) (non-critical)")
+        print("="*60 + "\n")
+    
+    return len(issues) == 0
+
+# Run startup validation
+validation_passed = validate_startup_requirements()
+if not validation_passed:
+    _LOGGER.error("Application startup validation failed. Some features may not work correctly.")
+    # Don't exit - let the app start anyway, but log the issues
+    # In production, you might want to exit here: sys.exit(1)
 
 def custom_get_station_list(self) -> list:
     """Get all stations with pagination support"""
@@ -775,18 +894,45 @@ def get_or_create_client(account):
                     
                     if os.path.exists(CAPTCHA_MODEL_PATH):
                         try:
-                            # Try to get absolute path and verify it's valid
+                            # Use absolute path to ensure it works in production
                             abs_path = os.path.abspath(CAPTCHA_MODEL_PATH)
                             _LOGGER.debug(f"[SESSION] CAPTCHA model absolute path: '{abs_path}'")
-                            client_kwargs["captcha_model_path"] = abs_path
-                            _LOGGER.info(f"[SESSION] CAPTCHA support enabled - using model: {abs_path}")
-                            print(f"Using CAPTCHA model: {abs_path}")
+                            # Verify file is readable
+                            if os.access(abs_path, os.R_OK):
+                                client_kwargs["captcha_model_path"] = abs_path
+                                _LOGGER.info(f"[SESSION] CAPTCHA support enabled - using model: {abs_path}")
+                                print(f"Using CAPTCHA model: {abs_path}")
+                            else:
+                                _LOGGER.warning(f"[SESSION] CAPTCHA model file exists but is not readable: {abs_path}")
+                                print(f"⚠️  Warning: CAPTCHA model file is not readable at {abs_path}")
                         except Exception as path_error:
                             _LOGGER.error(f"[SESSION] Error processing CAPTCHA model path '{CAPTCHA_MODEL_PATH}': {path_error}", exc_info=True)
                             print(f"⚠️  Error with CAPTCHA model path: {path_error}")
                     else:
                         _LOGGER.warning(f"[SESSION] CAPTCHA model path specified but file not found: {CAPTCHA_MODEL_PATH}")
-                        print(f"⚠️  Warning: CAPTCHA model not found at {CAPTCHA_MODEL_PATH}")
+                        _LOGGER.warning(f"[SESSION] Current working directory: {os.getcwd()}")
+                        _LOGGER.warning(f"[SESSION] App directory: {_app_dir}")
+                        _LOGGER.warning(f"[SESSION] Attempting to find model in common locations...")
+                        # Try alternative paths
+                        # NOTE: The first fallback must not repeat CAPTCHA_MODEL_PATH, otherwise it's ineffective.
+                        alt_paths = [
+                            os.path.join(os.getcwd(), "models", "captcha_huawei.onnx"),
+                            os.path.join(os.getcwd(), "src", "models", "captcha_huawei.onnx"),
+                            "models/captcha_huawei.onnx",
+                            "src/models/captcha_huawei.onnx",
+                        ]
+                        found = False
+                        for alt_path in alt_paths:
+                            abs_alt = os.path.abspath(alt_path)
+                            if os.path.exists(abs_alt) and os.access(abs_alt, os.R_OK):
+                                _LOGGER.info(f"[SESSION] Found CAPTCHA model at alternative path: {abs_alt}")
+                                client_kwargs["captcha_model_path"] = abs_alt
+                                print(f"Using CAPTCHA model (found at alternative path): {abs_alt}")
+                                found = True
+                                break
+                        if not found:
+                            _LOGGER.error(f"[SESSION] CAPTCHA model not found in any location. Login may fail if CAPTCHA is required.")
+                            print(f"⚠️  Warning: CAPTCHA model not found at {CAPTCHA_MODEL_PATH} or alternative paths")
                 else:
                     _LOGGER.debug(f"[SESSION] No CAPTCHA_MODEL_PATH configured")
                 
