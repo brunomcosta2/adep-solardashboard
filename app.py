@@ -166,15 +166,6 @@ CAPTCHA_MODEL_PATH = os.path.join("models", "captcha_huawei.onnx")
 if DOTENV_AVAILABLE:
     load_dotenv()
 
-# Default accounts (used as fallback if .env is not available or has no accounts)
-#DEFAULT_ACCOUNTS = [
-#    ("DomusSocial", "UpacsDM@2023FNT", "uni004eu5"),  # Porto Solar
-#    ("AEdP_EDS", "AEdP@2024", "uni003eu5"),  # Parque da Trindade
-#    ("UPAC_AMIAL", "amial2023", "uni003eu5"),  # Agra do Amial
-#    ("Adeporto", "Tribunal-2030", "uni001eu5"),  # Tribunal
-#    ("mapadeporto", "info-2030", "uni005eu5"), # MAP funcional
-#]
-
 def load_accounts_from_env():
     """
     Load multiple accounts from .env file.
@@ -973,6 +964,9 @@ def process_account(account):
             plant_id = plant['dn']
             plant_name = plant["name"]
             installed_capacity = installed_capacity_map.get(plant_name, 0)
+            # If plant is disconnected we may create a generic "Instalação Desligada" alert,
+            # but we'll only append it after checking alarms, to avoid duplicate alerts.
+            disconnected_alert_msg = None
 
             _LOGGER.debug(f"Processing plant {i}/{number_plants}: {plant_name} (ID: {plant_id})")
             print(f"  → Analyzing installation {i}/{number_plants}: {plant_name}")
@@ -1096,7 +1090,12 @@ def process_account(account):
                         # If parsing fails, use original format
                         alert_msg += f" (última comunicação: {last_data_time})"
                 
-                result["alerts"].append(alert_msg)
+                # For disconnected plants, defer adding the generic disconnect alert until
+                # after alarm checks (so we can override it with a more specific alarm).
+                if error_state == 1:
+                    disconnected_alert_msg = alert_msg
+                else:
+                    result["alerts"].append(alert_msg)
 
             surplus_power = max(production_power - consumption_power, 0)
 
@@ -1432,6 +1431,17 @@ def process_account(account):
                     error_type = type(e).__name__
                     _LOGGER.warning(f"Error checking alarms for {plant_name}: {error_type} - {error_msg}", exc_info=True)
                     # Don't fail the whole process if alarm check fails - just log and continue
+                finally:
+                    # If we have any active alarms (plant-level or inverter-level),
+                    # they explain the disconnect reason, so we skip the generic
+                    # "Instalação Desligada" alert to avoid duplication.
+                    if disconnected_alert_msg:
+                        if active_alarms:
+                            _LOGGER.info(
+                                f"Skipping generic disconnect alert for {plant_name} because {len(active_alarms)} active alarm(s) were found"
+                            )
+                        else:
+                            result["alerts"].append(disconnected_alert_msg)
             else:
                 # Plant is connected, skip alarm check to reduce API calls
                 _LOGGER.debug(f"Skipping alarm check for {plant_name} - plant is connected")

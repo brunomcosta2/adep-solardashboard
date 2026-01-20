@@ -27,4 +27,10 @@ Thumbs.db
 *.log
 test_instalacao_amial.py
 MELHORIAS_DASHBOARD.md
-test_results/20260115_173527_01_station_list.json
+test_results/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
